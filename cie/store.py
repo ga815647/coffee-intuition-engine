@@ -67,7 +67,8 @@ class StoreBackend(Protocol):
     def upsert_many(self, records: List[Record]) -> int: ...
     def search(self, query_text: str, mechanism: BrewMechanism, top_k: int = 20,
                process: Optional[str] = None, roast_band: Optional[str] = None,
-               exclude_predictions: bool = True) -> List[Dict[str, Any]]: ...
+               exclude_predictions: bool = True,
+               user_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]: ...
     def count(self) -> int: ...
 
 
@@ -142,6 +143,7 @@ class VectorStore:
         process: Optional[str] = None,
         roast_band: Optional[str] = None,
         exclude_predictions: bool = True,
+        user_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         qm = self._qm
         must = [qm.FieldCondition(key="brew_mechanism", match=qm.MatchValue(value=mechanism.value))]
@@ -149,6 +151,8 @@ class VectorStore:
             must.append(qm.FieldCondition(key="process", match=qm.MatchValue(value=process)))
         if roast_band:
             must.append(qm.FieldCondition(key="roast_band", match=qm.MatchValue(value=roast_band)))
+        if user_ids:  # 多租戶讀範圍(§16.3):只納入這些 user_id(如 global + 自己)
+            must.append(qm.FieldCondition(key="user_id", match=qm.MatchAny(any=list(user_ids))))
         must_not = []
         if exclude_predictions:
             must_not.append(qm.FieldCondition(key="grade", match=qm.MatchValue(value="prediction")))
@@ -192,7 +196,9 @@ class VectorStore:
 # ────────────────────────────── Cloudflare Vectorize 後端 ──────────────────────────────
 
 # 機制硬分區 + 結構化硬過濾用到的 metadata 欄(需先建 metadata index 才可過濾)。
-VECTORIZE_FILTER_FIELDS = ("brew_mechanism", "process", "roast_band", "grade")
+# user_id 供多租戶讀範圍過濾(§16.3);注意:metadata index 須在寫入前建立,
+# 既有向量不會回溯索引(見 ensure_index 註記)。
+VECTORIZE_FILTER_FIELDS = ("brew_mechanism", "process", "roast_band", "grade", "user_id")
 
 
 def _sanitize_metadata(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -269,6 +275,7 @@ class VectorizeStore:
         process: Optional[str] = None,
         roast_band: Optional[str] = None,
         exclude_predictions: bool = True,
+        user_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         flt: Dict[str, Any] = {"brew_mechanism": mechanism.value}  # 硬分區鍵
         if process:
@@ -277,6 +284,8 @@ class VectorizeStore:
             flt["roast_band"] = roast_band
         if exclude_predictions:
             flt["grade"] = {"$ne": "prediction"}
+        if user_ids:  # 多租戶讀範圍(§16.3):user_id ∈ 白名單(如 global + 自己)
+            flt["user_id"] = {"$in": list(user_ids)}
 
         vec = self.embedder.embed(query_text)
         body = {

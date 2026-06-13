@@ -25,9 +25,18 @@ from .store import StoreBackend, get_store
 def rebuild(store: Optional[StoreBackend] = None,
             canonical: Optional[CanonicalStore] = None,
             config=CONFIG) -> int:
-    """讀 canonical → 重嵌 → upsert 到 store。回傳寫入筆數。"""
+    """讀 canonical → 重嵌 → upsert 到 store。回傳寫入筆數。
+
+    對 Vectorize 後端,**先建 metadata index 再寫向量**(`ensure_index`):機制硬分區
+    與多租戶 `user_id` 讀過濾都靠 metadata 過濾,而 Vectorize 的索引**不回溯**——
+    既有向量不會被新建索引涵蓋。rebuild 是部署/換模型的寫入點,在此確保 user_id 等
+    過濾欄已索引,避免 §16.3 self 隔離在 Vectorize 上「過濾失效、靜默 fail-open」。
+    """
     store = store or get_store(config)
     canonical = canonical if canonical is not None else get_canonical(config)
+    ensure = getattr(store, "ensure_index", None)
+    if callable(ensure):
+        ensure()  # 冪等;記憶體/Qdrant 無此方法 → 略過。
     records = list(canonical.iter_records())
     return import_records(records, store)
 

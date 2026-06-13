@@ -100,11 +100,13 @@ python mcp_server.py              # 啟動 MCP(stdio)
 
 ## MCP / Worker 整合(接 claude.ai 時)
 
-要把 CIE 接成 claude.ai / Claude Code 可呼叫的 remote MCP 時,**照既有 `fellow-aiden-mcp` 的慣例**(設計見 `docs/DESIGN_v0.2.md` §13)。該參照專案是 Cloudflare Workers remote MCP(`agents` McpAgent + `@modelcontextprotocol/sdk` + zod)。必守重點:
+> ✅ **remote MCP 已落地(選項 B,Python 原生 streamable-http)。** 入口 `server_http.py`(`uvicorn server_http:app` 或 `python server_http.py`);與 stdio(`mcp_server.py`)**共用** `cie/mcp_tools.py` 一份工具邏輯,**未重寫任何引擎邏輯**。雙 token 認證(Bearer + `?token=`)、CORS 鎖 `*.claude.ai`、`/mcp`+`/health`、寫入信任閘(§16.2)、多租戶讀隔離(§16.3)皆生效並有測試(`tests/test_mcp_{gate,http}.py`)+ 端到端 smoke(`tools/smoke_http.py`)+ `Dockerfile`。設定見 `.env.example` 的 `CIE_MCP_*`;細節見 `docs/DESIGN_v0.2.md` §13.6 / §16.2 / §16.3、`README.md`「Remote MCP」。**TODO**:訪客 token self-serve 簽發、實際部署平台、claude.ai 連接器掛載(需公開 HTTPS host)、選項 A(純 Cloudflare Worker 邊緣)若日後要邊緣化再做。
+
+接 remote MCP 時**照既有 `fellow-aiden-mcp` 的慣例**(設計見 `docs/DESIGN_v0.2.md` §13)。該參照專案是 Cloudflare Workers remote MCP(`agents` McpAgent + `@modelcontextprotocol/sdk` + zod)。必守重點:
 
 - **雙重 token 認證(load-bearing)**:`MCP_AUTH_TOKEN` 同時接受 `Authorization: Bearer` 與 `?token=` query param;claude.ai 網頁連接器只能用 query 那條,別拿掉。未設密鑰 fail-closed。
 - **CORS 鎖 `*.claude.ai`**;`/mcp` + `/health` 路由。
 - **工具註冊**:rich description 寫滿約束;跨欄位規則在 handler 內 `safeParse` 補驗。結果用 `{content:[{type:text}], isError?}`。
 - **外部呼叫獨立模組**:typed error、401 re-login+retry、防禦式解析。
-- **落地抉擇**:CIE 重 ML 依賴跑不進 Workers。建議**選項 A**=薄 TS Worker 邊緣(照 Aiden 模式)+ Python ML 後端 HTTP API 當 worker。現有 `mcp_server.py`(stdio)留作本地/Claude Code 直連,remote 形態另立、不互斥。
+- **落地抉擇**:CIE 重 ML 依賴跑不進 Workers。**本輪採選項 B**(Python 原生 remote MCP:`server_http.py`,薄傳輸+認證+寫入閘,引擎邏輯全留 `cie.*`)。**選項 A**=薄 TS Worker 邊緣(照 Aiden 模式)+ Python ML 後端 HTTP API 當 worker,留作日後要純 Cloudflare 邊緣時的路徑;兩者不互斥。`mcp_server.py`(stdio)續作本地/Claude Code 直連。
 - 參照原始碼路徑(若已連接上層資料夾):`../fellow-aiden-mcp/src/{index,fellow,profile}.ts`。

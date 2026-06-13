@@ -28,7 +28,7 @@ class Engine:
 
     # ── 召回 ──
     def _recall(self, bean: BeanRoast, mechanism: BrewMechanism, flavor: FlavorProfile,
-                top_k: int = 20) -> List[dict]:
+                top_k: int = 20, user_ids: Optional[List[str]] = None) -> List[dict]:
         query_text = Record(
             bean=bean, params=BrewParams(brew_mechanism=mechanism), flavor=flavor
         ).build_embedding_text()
@@ -37,12 +37,14 @@ class Engine:
             process=bean.process.value if bean.process else None,
             roast_band=bean.roast_band() if bean.roast_band() != "unknown" else None,
             exclude_predictions=True,
+            user_ids=user_ids,  # 多租戶讀範圍(§16.3);None=不過濾(本地/owner 全可見)
         )
 
     # ── 推薦起手參數 ──
     def recommend(self, bean: BeanRoast, mechanism: BrewMechanism,
-                  target_flavor: Optional[FlavorProfile] = None) -> dict:
-        hits = self._recall(bean, mechanism, target_flavor or FlavorProfile())
+                  target_flavor: Optional[FlavorProfile] = None,
+                  user_ids: Optional[List[str]] = None) -> dict:
+        hits = self._recall(bean, mechanism, target_flavor or FlavorProfile(), user_ids=user_ids)
         ratio, flag, warnings = assess(hits)
         gc = physics.golden_cup_target(mechanism)
 
@@ -66,8 +68,9 @@ class Engine:
         }
 
     # ── 預測風味 ──
-    def predict(self, bean: BeanRoast, params: BrewParams) -> dict:
-        hits = self._recall(bean, params.brew_mechanism, FlavorProfile())
+    def predict(self, bean: BeanRoast, params: BrewParams,
+                user_ids: Optional[List[str]] = None) -> dict:
+        hits = self._recall(bean, params.brew_mechanism, FlavorProfile(), user_ids=user_ids)
         ratio, flag, warnings = assess(hits)
         flavor: Dict[str, dict] = {}
         for axis in FLAVOR_AXES:

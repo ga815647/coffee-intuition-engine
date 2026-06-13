@@ -57,6 +57,19 @@ class Config:
     notion_token: str = ""
     notion_feedback_db: str = ""
 
+    # ── Remote MCP(HTTP 公開門 = 唯讀,§13/§16「兩扇門」) ──
+    # 主要唯讀 token(日常 + 分享都用這條;對應 Aiden 的 MCP_AUTH_TOKEN);Bearer 與 ?token= 皆可。
+    # **HTTP 一切 token 皆唯讀**;寫入(校準)只在本機 Claude Code stdio(owner),不需網路 token。
+    mcp_auth_token: str = ""
+    # 額外唯讀 token(JSON `{token:label}` 物件或 `["token",...]` 陣列);供個別發放 / 撤銷。皆唯讀。
+    # 例:{"tok_alice":"alice","tok_bob":"bob"}(值僅作稽核標籤,不再是寫入命名空間)。
+    mcp_guest_tokens: str = ""
+    mcp_host: str = "0.0.0.0"
+    mcp_port: int = 8000
+    # streamable-http 無狀態模式:每請求自含(host-agnostic、可橫向擴展);
+    # 也是「認證中介層設的 per-request principal 能被工具看到」的前提(見 server_http)。
+    mcp_stateless: bool = True
+
     @classmethod
     def from_env(cls) -> "Config":
         return cls(
@@ -79,6 +92,14 @@ class Config:
             store_backend_override=_get("CIE_STORE_BACKEND"),
             notion_token=_get("CIE_NOTION_TOKEN"),
             notion_feedback_db=_get("CIE_NOTION_FEEDBACK_DB"),
+            mcp_auth_token=_get("CIE_MCP_AUTH_TOKEN"),
+            mcp_guest_tokens=_get("CIE_MCP_GUEST_TOKENS"),
+            mcp_host=_get("CIE_MCP_HOST", "0.0.0.0"),
+            # CIE_MCP_PORT 優先;否則用 PaaS(Render/Railway/Cloud Run…)注入的 $PORT;再否則 8000。
+            # 用 `or` 串接「coalesce 空字串」:`export PORT=`(present-but-empty)也退回 8000,
+            # 不會讓 int("") 在 import 期炸掉(_get 對「存在但空」回 "",default 只在 key 缺席時生效)。
+            mcp_port=int(_get("CIE_MCP_PORT") or _get("PORT") or "8000"),
+            mcp_stateless=_get("CIE_MCP_STATELESS", "1").lower() not in ("0", "false", "no", ""),
         )
 
     # ── 衍生判斷 ──
