@@ -51,6 +51,11 @@ class FakeD1:
 
     def d1_query(self, database_id, sql, params=None):
         self.calls.append(sql)
+        # D1 /query 綁定變數硬上限 = 100(真庫實測:100 OK、101 拋 SQLITE_ERROR 7500)。
+        # FakeD1 在此鏡射該上限 → extend 若分頁過大(撞限)在測試即炸,當回歸守門。
+        if params is not None and len(params) > 100:
+            raise RuntimeError(
+                f"too many SQL variables: {len(params)} > 100 (FakeD1 鏡射 D1 綁定上限)")
         head = sql.strip().upper()
         if head.startswith("CREATE"):
             return []
@@ -190,14 +195,16 @@ def test_d1_replace_all_clears_then_writes():
 # ────────────────────────────── 批次分割(SQLite 變數上限) ──────────────────────────────
 
 def test_d1_extend_batches_large_input():
-    """extend 大量(跨單批上限 150 列)仍全數寫入,且確實分多批(SQL 變數不撞 999)。"""
+    """extend 大量仍全數寫入,且分批讓每批綁定變數 ≤ 100(D1 上限;FakeD1 會對超限拋錯)。"""
+    import math
     fake = FakeD1()
     canon = _canon(fake)
-    n = 320                                            # 150 + 150 + 20 → 3 批
-    assert canon.extend([_rec(f"bean-{i}") for i in range(n)]) == n
+    per = D1Canonical._D1_MAX_VARS // len(D1Canonical._COLS)  # 100 // 6 = 16 列/批
+    n = 320
+    assert canon.extend([_rec(f"bean-{i}") for i in range(n)]) == n   # 不撞 100 變數上限
     assert len(list(canon.iter_records())) == n
     inserts = [c for c in fake.calls if c.upper().startswith("INSERT")]
-    assert len(inserts) == 3                           # 分 3 批(非單批塞 320×6 參數)
+    assert len(inserts) == math.ceil(n / per)          # ceil(320/16) = 20 批,非單批塞爆
 
 
 # ────────────────────────────── user_id 過濾(list_customizations 對應) ──────────────────────────────

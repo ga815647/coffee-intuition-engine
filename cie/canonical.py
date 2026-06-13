@@ -165,6 +165,9 @@ class D1Canonical:
     """
 
     _COLS = ("id", "user_id", "grade", "mechanism", "payload", "ts")
+    # D1 /query 的綁定變數硬上限 = 100(SQLITE_ERROR 7500「too many SQL variables」;
+    # 非 SQLite 預設 999)。對真庫實測:100 OK、101 拒。批次插入依此分頁(見 extend)。
+    _D1_MAX_VARS = 100
 
     def __init__(self, database_id: str = "", table: str = "records",
                  client=None, config=CONFIG):
@@ -216,8 +219,8 @@ class D1Canonical:
             return 0
         self._ensure_schema()
         cols = ", ".join(self._COLS)
-        # SQLite 變數上限(SQLITE_MAX_VARIABLE_NUMBER 預設 999);依欄數分批避免超限。
-        per = max(1, 900 // len(self._COLS))
+        # D1 綁定變數上限 100(見 _D1_MAX_VARS);依欄數分批避免超限。6 欄 → 每批 16 列(96 變數)。
+        per = max(1, self._D1_MAX_VARS // len(self._COLS))
         one = "(" + ", ".join(["?"] * len(self._COLS)) + ")"
         n = 0
         for i in range(0, len(rows), per):
