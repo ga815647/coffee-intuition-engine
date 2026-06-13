@@ -623,7 +623,7 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 **owner 本機 ↔ Cloud Run 的真相同步:** owner 在本機 stdio(`mcp_server.py`)用**同一份** `memory + r2 + workers_ai` 設定、指向**同一個 R2 bucket**。owner 寫 global / 晉升 self→global 都落那個 bucket;Cloud Run 下次冷啟動 `prime_serving_index` 即讀到。雙向:member 經 HTTP 寫的 self 也在 owner 本機冷啟動時可見(供晉升審查)。
 
 **權衡與守備:**
-- **`max-instances=1`(load-bearing):** `R2Canonical` 的 append 是 read-modify-write 整份覆寫,**非並發安全**(§15.1)。單實例 = 單寫者,避免兩容器同時 append 互相覆蓋。個人規模單寫者足夠;要水平擴展須改每筆獨立物件 + list 或 D1。
+- **`max-instances=1`(生產定案 D1 下為「最終一致」守備,非寫入安全必要):** 生產 canonical = **D1**,每筆獨立 `INSERT OR REPLACE`、**並發安全**(多寫者各寫各列、同 id 後寫者勝,§15.1),寫入層不再需要單寫者。仍設 `max-instances=1` 只為避免**多實例各持過時的記憶體 serving 索引**(member 寫只更新本實例記憶體 + D1,他實例要到下次冷啟動才從 D1 重建看到 → 跨實例最終一致);個人規模單實例最簡。(歷史:選 `R2Canonical` 時 `max-instances=1` 是寫入安全的硬需求——R2 append 為 read-modify-write 整檔覆寫、非並發安全;改 D1 後此硬約束解除。)
 - **`CIE_MCP_STATELESS=1`(命門):** member/reader 的 per-request principal 走 contextvar,只有 stateless streamable-http 保證工具看得到;有狀態模式會讓網路呼叫者退回 owner 預設(可寫 global)→ `build_app` 對 stateless=False **fail-closed 拒啟動**(見 §16.3、`server_http`)。
 - **`$PORT`:** Cloud Run 注入監聽埠(8080);`Dockerfile` **不**硬寫 `CIE_MCP_PORT`,`cie/config.py` 以 `CIE_MCP_PORT or $PORT or 8000` coalesce。
 - **CF API token 最小權限:** 只需 **Workers AI:Run + R2:Edit**(無 Vectorize 權限——生產不用它)。
@@ -646,11 +646,12 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 
 | 角色 | 介面 / 實作 |
 |---|---|
-| 介面 | `CanonicalStore`:`append(record)` / `extend(records)` / `iter_records()` |
+| 介面 | `CanonicalStore`:`append(record)` / `extend(records)` / `iter_records()`(+選配 `select_by_user` / `replace_all`) |
 | 本地 | `LocalJsonlCanonical`:append-only JSONL(`CIE_CANONICAL_PATH`,預設 `./data/canonical.jsonl`) |
-| 雲端(選配) | `R2Canonical`:R2 物件存整份 JSONL;append 採 **read-modify-write**(缺金鑰不啟用) |
-| 工廠 | `get_canonical(config)`:有 CF 金鑰 + `CIE_R2_BUCKET` → R2;否則 Local |
-| sink 選擇 | `maybe_get_canonical(store, config)`:**(1) `canonical_backend=="r2"` → 一律掛 R2 sink**(即便後端有 `iter_records`;生產記憶體索引不跨行程,R2 才是共用真相,見 §14.7);**(2) 後端無 `iter_records`(=Vectorize)→ 必掛 sink**;其餘(記憶體/Qdrant + 本地 canonical)回 `None`(避免重複寫與測試副作用) |
+| 雲端(**生產定案**) | `D1Canonical`:Cloudflare D1(SQLite-over-HTTP),每筆 Record 一列(`id` PK);寫入 **INSERT OR REPLACE**(同 id 後寫者勝)、讀 `SELECT … ORDER BY rowid`、`select_by_user` = `SELECT … WHERE user_id=?`。**逐筆寫、無整檔 race**(見下「並發」)。schema 惰性確保(首讀寫才 `CREATE TABLE/INDEX IF NOT EXISTS`,建構不觸網路)。需 token `D1:Edit`(缺金鑰/db_id 不啟用) |
+| 雲端(選項) | `R2Canonical`:R2 物件存整份 JSONL;append 採 **read-modify-write**(需綁卡啟用 R2 + `R2:Edit`) |
+| 工廠 | `get_canonical(config)`:**顯式 `CIE_CANONICAL_BACKEND` > d1(CF 金鑰 + `CIE_D1_DATABASE_ID`)> r2(CF 金鑰 + `CIE_R2_BUCKET`)> Local**(`config.canonical_backend`) |
+| sink 選擇 | `maybe_get_canonical(store, config)`:**(1) `canonical_backend ∈ {d1, r2}` → 一律掛該 sink**(即便後端有 `iter_records`;生產記憶體索引不跨行程,D1/R2 才是共用真相,見 §14.7);**(2) 後端無 `iter_records`(=Vectorize)→ 必掛 sink**;其餘(記憶體/Qdrant + 本地 canonical)回 `None`(避免重複寫與測試副作用) |
 
 **接線(雙寫):**
 - **bootstrap(初始來源):** `cie/bootstrap.py`(`python -m cie.bootstrap`)把**策展語料 `corpus/global.jsonl`(446 筆,`tools/qa_merge.py` 由 `corpus/raw/` provenance 重生)**整批灌入 canonical sink。這是 canonical 的初始真相,**不是**空的 `./data/canonical.jsonl`、也不是 6 筆 `seeds/anchors.jsonl`。一次性;`--force` 用 `canonical.replace_all` 整份覆寫(re-init/災後重建)。canonical = 此策展語料(初始) + 之後 `log_calibration` 累積的回饋。
@@ -660,9 +661,11 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 
 **重建(`cie/rebuild.py` / `python -m cie.rebuild`):** 讀 canonical 全量 → 用**當前**嵌入器重嵌 → upsert(`portability.import_records`)。**一律重嵌、不搬舊向量**(嵌入器一致性鐵則)。這就是 Vectorize / 記憶體部署的還原點:canonical(R2/本地)是源,索引隨時可重生、可換模型。
 
-**同 id 去重(保留最後一筆,load-bearing):** canonical 是 **append-only**,故同一 id 可能出現多次——主因是 `promote_customization` 就地同 id 改寫(self→global,§16.2);次因是極少數「`canonical.append` 已成功、隨後 `store.upsert` 拋例外傳播,呼叫端以**同一筆(同 id)**重試」→ 同 id 再 append 一次(以**不同 id** 重試則是另一回事:近似重複,屬已接受的 durability 取捨、非去重對象)。`import_records` 在重嵌前**明確以 id 去重、保留最後一筆**(後寫者勝 = 晉升後 / 修正後的版本),**不依賴後端 batch upsert 的隱性語意**。意義:owner 在本機晉升一筆 self→global 後,Cloud Run 下次冷啟動從 R2 重建時,該記錄**確定**是 global 版、不會靜默回退成舊的 self 版(否則既破壞晉升、又把記錄打回 member 命名空間 → 破 §16.3 self 隔離)。回歸測試 `tests/test_serving_index.py::test_promotion_survives_cold_start_keeps_global_not_revert`。`upsert_many` 因此不保證 batch 內同 id 勝出者——去重契約在 `import_records`。
+**同 id 去重(保留最後一筆,load-bearing):** 此段針對 **append-only** 後端(`LocalJsonlCanonical` / `R2Canonical`)。**`D1Canonical` 用 `id` PK + `INSERT OR REPLACE`,在 canonical 層即「同 id 只剩一列、後寫者勝」**——晉升 / 修正天然冪等,不依賴重建期去重(下述 `import_records` 去重仍保留,作為跨後端的統一契約 + append-only 後端的必要保證)。append-only 後端中,同一 id 可能出現多次——主因是 `promote_customization` 就地同 id 改寫(self→global,§16.2);次因是極少數「`canonical.append` 已成功、隨後 `store.upsert` 拋例外傳播,呼叫端以**同一筆(同 id)**重試」→ 同 id 再 append 一次(以**不同 id** 重試則是另一回事:近似重複,屬已接受的 durability 取捨、非去重對象)。`import_records` 在重嵌前**明確以 id 去重、保留最後一筆**(後寫者勝 = 晉升後 / 修正後的版本),**不依賴後端 batch upsert 的隱性語意**。意義:owner 在本機晉升一筆 self→global 後,Cloud Run 下次冷啟動從 R2 重建時,該記錄**確定**是 global 版、不會靜默回退成舊的 self 版(否則既破壞晉升、又把記錄打回 member 命名空間 → 破 §16.3 self 隔離)。回歸測試 `tests/test_serving_index.py::test_promotion_survives_cold_start_keeps_global_not_revert`。`upsert_many` 因此不保證 batch 內同 id 勝出者——去重契約在 `import_records`。
 
-**R2 注意:** R2 物件無原生 append,`R2Canonical` 以 read-modify-write 覆寫整份物件——**非並發安全**(個人單寫者足夠;高並發應改每筆獨立物件 + list,或改 D1)。REST 走既有 `cie/_http.py`(新增 `request_text` 原始文字傳輸)+ `cfapi.py` 的 `r2_get_object`(404→`None`)/`r2_put_object`,**零新 pip 依賴**;金鑰只進 `.env`。
+**並發(D1 vs R2):** `R2Canonical` 物件無原生 append,以 read-modify-write 覆寫整份物件——**非並發安全**(兩寫者可互相覆蓋整檔)。**`D1Canonical` 解掉此 race:每筆是獨立的 `INSERT OR REPLACE` 一列,多寫者各寫各列、同 id 後寫者勝、無整檔覆寫**。故生產 `max-instances=1` 對 D1 不再是「寫入安全」必要條件(D1 並發安全),仍保留只為避免多實例各持過時的記憶體 serving 索引(跨實例最終一致;個人規模單實例最簡),見 §14.7。REST 走既有 `cie/_http.py`(`request_text` / `post_json`)+ `cfapi.py` 的 `d1_query`(POST `/d1/database/{id}/query`,v4 信封、位置綁定 `?` 防注入)、`r2_get_object` / `r2_put_object`,**零新 pip 依賴**;金鑰只進 `.env`。
+
+> **已對真庫驗證(2026-06):** 對 live D1 `cie-canonical`(APAC)實跑 `D1Canonical` 的確切 DDL/SQL:CREATE TABLE/INDEX → INSERT OR REPLACE 同 id 兩次 → `count(*)=1`(冪等)、`payload` 為後寫者(last-writer-wins)、`WHERE user_id=` 過濾正確、`DELETE FROM`(replace_all 路徑)→ `count(*)=0`。SQLite 方言與本實作一致。
 
 ### 15.2 盲測評測集(證明「越用越準」)
 

@@ -150,10 +150,123 @@ class R2Canonical:
         yield from _jsonl_to_records(self._read_text())
 
 
+# ────────────────────────────── Cloudflare D1 ──────────────────────────────
+
+class D1Canonical:
+    """Cloudflare D1(SQLite-over-HTTP)canonical(生產定案後端)。每筆 Record 一列。
+
+    `payload` 欄存完整 Record JSON(真相);`user_id / grade / mechanism` 去正規化出來供
+    WHERE 過濾(如 list_customizations = SELECT WHERE user_id)。寫入用 **INSERT OR REPLACE**
+    (id 為主鍵)→ 同 id 後寫者勝(晉升 / 修正天然冪等、不需事後去重),且**逐筆寫、無
+    R2 單物件 read-modify-write 的並發 race**:多寫者各寫各列不互相覆蓋。需 token 權限 D1:Edit。
+
+    schema 採**惰性確保**(首次讀寫才 CREATE TABLE/INDEX IF NOT EXISTS):建構不觸網路,
+    與 R2Canonical 一致(工廠 / isinstance 測試離線可跑)。
+    """
+
+    _COLS = ("id", "user_id", "grade", "mechanism", "payload", "ts")
+
+    def __init__(self, database_id: str = "", table: str = "records",
+                 client=None, config=CONFIG):
+        from .cfapi import CloudflareClient
+        self.database_id = database_id or config.d1_database_id
+        if not self.database_id:
+            raise ValueError("D1Canonical 需 database_id(設 CIE_D1_DATABASE_ID 或傳入)。")
+        self.table = table
+        self.client = client or CloudflareClient(
+            config.cf_account_id, config.cf_api_token,
+            config.cf_timeout_s, config.cf_max_retries,
+        )
+        self._schema_ready = False
+
+    # ── schema(惰性、冪等) ──
+    def _ensure_schema(self) -> None:
+        if self._schema_ready:
+            return
+        self.client.d1_query(
+            self.database_id,
+            f"CREATE TABLE IF NOT EXISTS {self.table} ("
+            "id TEXT PRIMARY KEY, user_id TEXT, grade TEXT, mechanism TEXT, "
+            "payload TEXT NOT NULL, ts TEXT)")
+        self.client.d1_query(
+            self.database_id,
+            f"CREATE INDEX IF NOT EXISTS idx_{self.table}_user ON {self.table}(user_id)")
+        self._schema_ready = True
+
+    @classmethod
+    def _row_params(cls, r: Record) -> List[object]:
+        """Record → 一列的位置參數(順序須與 _COLS 一致)。payload 為完整 JSON 真相。"""
+        return [r.id, r.user_id, r.grade.value, r.params.brew_mechanism.value,
+                r.model_dump_json(), r.timestamp]
+
+    @staticmethod
+    def _rows(result) -> List[dict]:
+        """從 d1_query 的 result 陣列取第一語句的列(SELECT 用)。"""
+        if result and isinstance(result, list):
+            return (result[0] or {}).get("results") or []
+        return []
+
+    # ── 寫 ──
+    def append(self, record: Record) -> None:
+        self.extend([record])
+
+    def extend(self, records: Iterable[Record]) -> int:
+        rows = list(records)
+        if not rows:
+            return 0
+        self._ensure_schema()
+        cols = ", ".join(self._COLS)
+        # SQLite 變數上限(SQLITE_MAX_VARIABLE_NUMBER 預設 999);依欄數分批避免超限。
+        per = max(1, 900 // len(self._COLS))
+        one = "(" + ", ".join(["?"] * len(self._COLS)) + ")"
+        n = 0
+        for i in range(0, len(rows), per):
+            batch = rows[i:i + per]
+            placeholders = ", ".join([one] * len(batch))
+            sql = f"INSERT OR REPLACE INTO {self.table} ({cols}) VALUES {placeholders}"
+            params: List[object] = []
+            for r in batch:
+                params.extend(self._row_params(r))
+            self.client.d1_query(self.database_id, sql, params)
+            n += len(batch)
+        return n
+
+    def replace_all(self, records: Iterable[Record]) -> int:
+        """整份覆寫(re-init / bootstrap --force):清表再批次插入。回傳寫入筆數。
+
+        ⚠️ 會清掉累積的校準回饋。bootstrap 是一次性初始化;之後只用 append/extend。
+        """
+        self._ensure_schema()
+        self.client.d1_query(self.database_id, f"DELETE FROM {self.table}")
+        return self.extend(records)
+
+    # ── 讀 ──
+    def iter_records(self) -> Iterator[Record]:
+        self._ensure_schema()
+        result = self.client.d1_query(
+            self.database_id, f"SELECT payload FROM {self.table} ORDER BY rowid")
+        for row in self._rows(result):
+            payload = row.get("payload")
+            if payload:
+                yield Record.model_validate_json(payload)
+
+    def select_by_user(self, user_id: str) -> List[Record]:
+        """SELECT WHERE user_id(供「列某人 self 客製層」之類按租戶過濾)。"""
+        self._ensure_schema()
+        result = self.client.d1_query(
+            self.database_id,
+            f"SELECT payload FROM {self.table} WHERE user_id = ? ORDER BY rowid",
+            [user_id])
+        return [Record.model_validate_json(row["payload"])
+                for row in self._rows(result) if row.get("payload")]
+
+
 # ────────────────────────────── 工廠 ──────────────────────────────
 
 def get_canonical(config=CONFIG) -> CanonicalStore:
-    """依設定選 canonical 後端:有 CF 金鑰 + R2 bucket → R2;否則本地 JSONL。"""
+    """依設定選 canonical 後端:d1(金鑰+db_id)> r2(金鑰+bucket)> 本地 JSONL。"""
+    if config.canonical_backend == "d1":
+        return D1Canonical(config=config)
     if config.canonical_backend == "r2":
         return R2Canonical(config=config)
     return LocalJsonlCanonical(config=config)
@@ -174,7 +287,7 @@ def maybe_get_canonical(store, config=CONFIG) -> Optional[CanonicalStore]:
     其餘(離線開發:記憶體 / Qdrant + 本地 canonical)後端自存 `_canonical`,回 None
     避免重複寫與測試副作用(不會憑空寫出 `./data/canonical.jsonl`)。
     """
-    if config.canonical_backend == "r2":
+    if config.canonical_backend in ("r2", "d1"):   # 外部持久共用真相 → 一律掛 sink
         return get_canonical(config)
     if hasattr(store, "iter_records"):
         return None

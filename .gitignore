@@ -6,6 +6,7 @@ venv/
 *.egg-info/
 .pytest_cache/
 .qdrant/
+.wrangler/
 *.log
 
 # 可重生衍生物 / 運行期快取(不入庫)。真相已入庫:corpus/global.jsonl(curated)

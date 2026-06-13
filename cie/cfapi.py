@@ -128,6 +128,21 @@ class CloudflareClient:
                                   getattr(e, "body", "")) from e
         return self._unwrap(resp, "Vectorize info") or {}
 
+    # ── D1(canonical 真相層;SQLite-over-HTTP query) ──
+    def d1_query(self, database_id: str, sql: str,
+                 params: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
+        """POST /d1/database/{id}/query;回傳 result 陣列(每元素含 results/success/meta)。
+
+        D1 /query 走標準 v4 信封;result 為「逐語句結果」清單,單語句取 result[0]。
+        params 為位置綁定(?),套用於 SQL 的 placeholder(防注入、批次插入用)。
+        SELECT 的列在 result[0]["results"];INSERT/DELETE 的影響列數在 result[0]["meta"]。
+        """
+        url = f"{CF_API_BASE}/accounts/{self.account_id}/d1/database/{database_id}/query"
+        payload: Dict[str, Any] = {"sql": sql}
+        if params is not None:
+            payload["params"] = params
+        return self._unwrap(self._post(url, payload=payload), "D1 query") or []
+
     # ── R2 物件存取(canonical JSONL 真相層) ──
     # GET 回傳**原始物件 body**(非 v4 信封)故走 request_text;PUT 仍回 v4 信封,需驗 success。
     def _r2_object_url(self, bucket: str, key: str) -> str:

@@ -49,9 +49,14 @@ class Config:
     # R2(選配):有 CF 金鑰 + bucket → 用 R2 物件存 canonical JSONL。
     r2_bucket: str = ""
     r2_canonical_key: str = "canonical.jsonl"
+    # D1(選配,canonical 生產後端):SQLite-over-HTTP,逐筆 INSERT OR REPLACE。
+    # 相對 R2 單物件 read-modify-write,D1 無整檔覆寫 race(同 id 後寫者勝、多寫者各寫各列)。
+    d1_database_id: str = ""
 
     # 後端覆寫(留空 = 自動偵測)
     store_backend_override: str = ""
+    # canonical 後端覆寫:local | r2 | d1(留空 = 自動偵測,見 canonical_backend)。
+    canonical_backend_override: str = ""
 
     # ── Notion(選配) ──
     notion_token: str = ""
@@ -89,7 +94,9 @@ class Config:
             canonical_path=_get("CIE_CANONICAL_PATH", "./data/canonical.jsonl"),
             r2_bucket=_get("CIE_R2_BUCKET"),
             r2_canonical_key=_get("CIE_R2_CANONICAL_KEY", "canonical.jsonl"),
+            d1_database_id=_get("CIE_D1_DATABASE_ID"),
             store_backend_override=_get("CIE_STORE_BACKEND"),
+            canonical_backend_override=_get("CIE_CANONICAL_BACKEND"),
             notion_token=_get("CIE_NOTION_TOKEN"),
             notion_feedback_db=_get("CIE_NOTION_FEEDBACK_DB"),
             mcp_auth_token=_get("CIE_MCP_AUTH_TOKEN"),
@@ -125,7 +132,15 @@ class Config:
 
     @property
     def canonical_backend(self) -> str:
-        """canonical 真相層後端:r2(有 CF 金鑰 + bucket)| local(預設 JSONL)。"""
+        """canonical 真相層後端:顯式 override > d1(金鑰+db_id)> r2(金鑰+bucket)> local。
+
+        生產定案走 d1(已啟用、免綁卡,逐筆 INSERT 無整檔 race);R2 留作選項。
+        顯式 CIE_CANONICAL_BACKEND 最高優先(部署時權威設定)。
+        """
+        if self.canonical_backend_override:
+            return self.canonical_backend_override
+        if self.has_cf_creds and self.d1_database_id:
+            return "d1"
         if self.has_cf_creds and self.r2_bucket:
             return "r2"
         return "local"
