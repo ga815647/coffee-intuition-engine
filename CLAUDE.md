@@ -83,7 +83,7 @@ python mcp_server.py              # 啟動 MCP(stdio)
 **P1 — 把「直覺」做扎實**
 - 收縮升級:`retrieval.weighted_estimate` 由 `n/(n+k)` 近似改成層級貝氏(群組先驗=同機制+同處理法+同焙度帶)。驗收:少樣本時估計明顯往群組先驗收斂的單元測試。
 - Conformal/CQR:用 MAPIE 或自實作 split-conformal + 小樣本 Beta 修正(SSBC),取代經驗分位 stub;對味覺漂移用加權 conformal。驗收:留出集實測覆蓋 ≈ 名目(±)。
-- 🚧 **盲測評測集(關鍵,進行中)**:建 `eval/`,對庫中沒有的豆先 `predict` → 人工盲評 → 算 L3 各軸 MAE/區間覆蓋,當回歸測試。沒有它就無法證明「越用越準」。**已落地**:`eval/dataset.jsonl`(5 筆離線示例,涵蓋三機制)+ `python -m eval.run` 算 MAE/RMSE、conformal 區間覆蓋、**同機制**方向排序準確率,並含三道防洩漏(留出豆排除 + 結構性無子項回推 + 預測不寫回)。**召回庫來源 = `corpus/global.jsonl`(446 筆策展真相)扣除 holdout**(按豆+機制+參數的**內容指紋**扣除,因語料不帶穩定 id),不再是 6 筆 seeds;eval 報告 `庫=446`。離線雜湊嵌入**不下 MAE 門檻**;真實準度待接 `workers_ai` 嵌入 + 真實資料(同一 harness 複用)。詳見 §15.2。
+- 🚧 **盲測評測集(關鍵,進行中)**:建 `eval/`,對庫中沒有的豆先 `predict` → 人工盲評 → 算 L3 各軸 MAE/區間覆蓋,當回歸測試。沒有它就無法證明「越用越準」。**已落地**:`python -m eval.run` 預設跑**按機制分層的 k-fold 交叉驗證**(`run_cv_eval`,k=5):留出集 = `corpus/global.jsonl` 的 **A/B 級**記錄、按機制分層,每筆 A/B 輪流當一次 holdout(取代撐不起結論的 5 筆合成 holdout);**C 級永不當 holdout 真值**(只留召回庫壓量級)。算 MAE/RMSE、conformal 區間覆蓋、**同機制**方向排序準確率,**且分機制報告 n/MAE/覆蓋/方向**。**召回庫 = `corpus/global.jsonl`(446 筆策展真相)每折扣除該折 holdout**(按豆+機制+參數的**內容指紋**扣除,因語料不帶穩定 id)。含三道防洩漏(留出豆排除 + 結構性無子項回推 + 預測不寫回)+ C 級守衛。合成 `eval/dataset.jsonl` 降級為**洩漏偵測器回歸**(`run_eval` 路徑)。離線雜湊嵌入**不下 MAE 門檻**;真實準度待接 `workers_ai` 嵌入 + 真實資料(同一 harness 複用)。詳見 §15.2。
 
 **P2 — 資料與整合**
 - Notion 雙寫:`log_calibration` 同步寫 Notion 回饋 DB(讀 `CIE_NOTION_*`)+ 向量庫;夜間一致性校驗。
