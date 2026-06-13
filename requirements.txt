@@ -1,0 +1,15 @@
+# Core
+pydantic>=2.6
+numpy>=1.26
+qdrant-client>=1.9
+
+# MCP server
+mcp>=1.2
+
+# Cloudflare 後端(Workers AI 嵌入 + Vectorize 向量庫)走 stdlib urllib,零新依賴。
+# 選配雲端嵌入供應商(需要才解註):
+# openai>=1.30
+# voyageai>=0.2
+
+# Dev
+pytest>=8.0
