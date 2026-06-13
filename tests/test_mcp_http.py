@@ -167,6 +167,43 @@ def test_bare_options_without_origin_is_401(client):
     assert r.json()["error"] == "unauthorized"
 
 
+# ────────────────────────────── 傳輸層 DNS-rebinding(公開部署 Host 防 421) ──────────────────────────────
+
+# 真 MCP initialize:走完傳輸層 → 才看得到「被 DNS-rebinding 防護擋掉(421)」與否。
+# (上面 ping 測試只斷言 != 401;421 也 != 401,故擋不住此回歸 —— 線上 Cloud Run 曾因此 421。)
+_INIT = {
+    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+    "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+               "clientInfo": {"name": "regression", "version": "0"}},
+}
+_MCP_HEADERS = {"Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json"}
+
+
+def test_arbitrary_host_not_misdirected(client):
+    """公開部署回歸:FastMCP 預設 host=127.0.0.1 會自動開 DNS-rebinding 防護、只准 localhost,
+    雲端真實 Host(如 *.run.app)→ 421 Misdirected Request,連 initialize 都到不了工具。
+    build_app 顯式關閉內建 allowlist(預設),故任意 Host 應成功握手(200,非 421)。"""
+    r = client.post(f"/mcp?token={PRIMARY}",
+                    headers={**_MCP_HEADERS, "Host": "cie-mcp-abc123.asia-east1.run.app"},
+                    json=_INIT)
+    assert r.status_code != 421, "雲端 Host 被 DNS-rebinding 防護擋下(回歸!見 _transport_security)"
+    assert r.status_code == 200, f"initialize 應成功握手,實得 {r.status_code}:{r.text[:200]}"
+
+
+def test_allowed_hosts_lock_enforced_when_configured():
+    """進階硬化:設 CIE_MCP_ALLOWED_HOSTS 後 → 開啟防護;未列 Host → 421,列入的 Host → 200。"""
+    cfg = _cfg(mcp_allowed_hosts="cie.example.com, cie.example.com:*")
+    app, _ = server_http.build_app(config=cfg, engine=Engine(VectorStore()), auto_seed=True)
+    with TestClient(app) as c:
+        bad = c.post(f"/mcp?token={PRIMARY}",
+                     headers={**_MCP_HEADERS, "Host": "evil.example.com"}, json=_INIT)
+        assert bad.status_code == 421, f"未列 Host 應被擋(421),實得 {bad.status_code}"
+        good = c.post(f"/mcp?token={PRIMARY}",
+                      headers={**_MCP_HEADERS, "Host": "cie.example.com"}, json=_INIT)
+        assert good.status_code == 200, f"列入的 Host 應通過,實得 {good.status_code}:{good.text[:200]}"
+
+
 # ────────────────────────────── 安全不變式:stateless 為前提(命門) ──────────────────────────────
 
 def test_build_app_refuses_stateful_mode():

@@ -74,6 +74,13 @@ class Config:
     # streamable-http 無狀態模式:每請求自含(host-agnostic、可橫向擴展);
     # 也是「認證中介層設的 per-request principal 能被工具看到」的前提(見 server_http)。
     mcp_stateless: bool = True
+    # MCP 傳輸層 DNS-rebinding 防護的 Host allowlist(逗號分隔,支援 ':*' 埠萬用)。
+    # 留空(預設)= 關閉內建 host/origin allowlist:公開 token-gated 服務的真正邊界是 fail-closed
+    # token 認證 + CORS 鎖 *.claude.ai;DNS rebinding(借瀏覽器受害者網路位置打 localhost)對公開
+    # 可路由服務無增益。**且 FastMCP 在 host=127.0.0.1 時會自動開此防護、allowlist 只含 localhost,
+    # 擋掉雲端 Host → 421**;故公開部署須顯式關閉(見 server_http._transport_security)。
+    # 綁定固定自有網域時可填(如 "cie.example.com,cie.example.com:*")硬化。
+    mcp_allowed_hosts: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -107,6 +114,7 @@ class Config:
             # 不會讓 int("") 在 import 期炸掉(_get 對「存在但空」回 "",default 只在 key 缺席時生效)。
             mcp_port=int(_get("CIE_MCP_PORT") or _get("PORT") or "8000"),
             mcp_stateless=_get("CIE_MCP_STATELESS", "1").lower() not in ("0", "false", "no", ""),
+            mcp_allowed_hosts=_get("CIE_MCP_ALLOWED_HOSTS"),
         )
 
     # ── 衍生判斷 ──
@@ -124,6 +132,11 @@ class Config:
         if self.qdrant_url:
             return "qdrant"
         return "memory"
+
+    @property
+    def mcp_allowed_hosts_list(self) -> list[str]:
+        """解析 CIE_MCP_ALLOWED_HOSTS(逗號分隔)為去空白清單;空 = 關閉 host allowlist。"""
+        return [h.strip() for h in self.mcp_allowed_hosts.split(",") if h.strip()]
 
     @property
     def use_memory_store(self) -> bool:

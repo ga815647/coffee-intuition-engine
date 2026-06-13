@@ -49,6 +49,34 @@ CLAUDE_ORIGIN_REGEX = r"https://([a-z0-9-]+\.)*claude\.ai"
 PUBLIC_PATHS = frozenset({"/", "/health"})
 
 
+def _transport_security(config):
+    """MCP 傳輸層 DNS-rebinding 防護設定。
+
+    **載重點**:FastMCP 在 host=127.0.0.1(其預設)時會**自動開啟** DNS-rebinding 防護,且
+    allowlist 只含 localhost;部署到 Cloud Run 等公開平台時,真實 Host(如 `*.run.app`)不在
+    allowlist → MCP 傳輸層回 **421 Misdirected Request**,連 initialize 都到不了工具。
+
+    本服務的安全邊界是 **fail-closed token 認證(TokenAuthMiddleware)+ CORS 鎖 *.claude.ai**;
+    DNS rebinding 防的是「惡意網頁借受害者瀏覽器的網路位置去打 localhost MCP」,對**公開可路由**
+    的服務無增益(攻擊者本就能直接打)。故預設**顯式關閉**內建 host/origin allowlist(同時抑制上述
+    127.0.0.1 自動開啟),改由 token + CORS 把關。
+
+    進階硬化:綁定固定自有網域時設 `CIE_MCP_ALLOWED_HOSTS`(逗號分隔,支援 ':*' 埠萬用)→ 開啟
+    防護並鎖該 host 清單(origin 同時放行該些 host 的 https 與 claude.ai)。
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    hosts = config.mcp_allowed_hosts_list
+    if not hosts:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    origins = [f"https://{h.split(':', 1)[0]}" for h in hosts] + ["https://claude.ai"]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
+    )
+
+
 # ────────────────────────────── 認證(pure ASGI middleware) ──────────────────────────────
 
 def _extract_token(scope) -> Optional[str]:
@@ -154,7 +182,13 @@ def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = 
         )
 
     eng = engine or Engine()
-    mcp = FastMCP("coffee-intuition-engine", stateless_http=config.mcp_stateless)
+    # transport_security 顯式傳入(即使預設關閉):否則 FastMCP 因 host=127.0.0.1 自動開 DNS-rebinding
+    # 防護、雲端 Host 不在 allowlist → 421(見 _transport_security)。
+    mcp = FastMCP(
+        "coffee-intuition-engine",
+        stateless_http=config.mcp_stateless,
+        transport_security=_transport_security(config),
+    )
     # 網路面:掛讀工具 + log_calibration(member 受限寫:confinement + grade≤B)。
     # **不掛晉升工具**(include_promotion=False)→ 網路無 self→global / global 寫入路徑;晉升只在 stdio。
     register_tools(mcp, eng, include_writes=True, include_promotion=False)
