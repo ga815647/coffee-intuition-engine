@@ -5,7 +5,7 @@
 # 本地跑:docker run --rm -p 8000:8000 --env-file .env cie-mcp   # 未注入 $PORT → 預設 8000
 # 連接:  https://<host>/mcp?token=<CIE_MCP_AUTH_TOKEN>(claude.ai 自訂連接器)
 #
-# 生產(本輪):記憶體自幹 index + R2 共用 canonical + Workers AI 嵌入;runtime 僅需
+# 生產(本輪):記憶體自幹 index + D1 共用 canonical + Workers AI 嵌入;runtime 僅需
 # stdlib+pydantic+REST(嵌入 / canonical 走 REST),numpy/qdrant 撐記憶體向量庫,映像仍輕。
 FROM python:3.12-slim
 
