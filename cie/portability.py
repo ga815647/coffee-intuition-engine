@@ -44,13 +44,21 @@ def read_jsonl(path: PathLike) -> List[Record]:
     return records
 
 
+def import_records(records: List[Record], store) -> int:
+    """用 store 的『當前嵌入器』重新嵌入 records → upsert。回傳寫入筆數。
+
+    換模型 / 換後端 / 重建索引的核心:**一律重嵌、不搬舊向量**(嵌入器一致性鐵則)。
+    來源可以是 JSONL 路徑(`import_jsonl`)或 canonical 真相層(`cie.rebuild`)。
+    """
+    return store.upsert_many(records)
+
+
 def import_jsonl(path: PathLike, store) -> int:
     """讀 JSONL → 用 store 的『當前嵌入器』重新嵌入 → upsert。回傳寫入筆數。
 
     這是換模型 / 換後端 / 重建索引的標準路徑:canonical 不變,向量重生。
     """
-    records = read_jsonl(path)
-    return store.upsert_many(records)
+    return import_records(read_jsonl(path), store)
 
 
 def export_store(store, path: PathLike) -> int:

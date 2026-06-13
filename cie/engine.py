@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from . import physics
+from .canonical import CanonicalStore, maybe_get_canonical
 from .retrieval import RetrievalResult, assess, weighted_estimate
 from .schema import (
     FLAVOR_AXES, BeanRoast, BrewMechanism, BrewParams, FlavorProfile, Grade, Record,
@@ -18,8 +19,12 @@ PARAM_TARGETS = ["water_temp_c", "brew_ratio", "grind_um", "contact_time_s"]
 
 
 class Engine:
-    def __init__(self, store: Optional[StoreBackend] = None):
+    def __init__(self, store: Optional[StoreBackend] = None,
+                 canonical: Optional[CanonicalStore] = None):
         self.store = store or get_store()
+        # canonical 真相 sink:僅當後端無法自存(Vectorize)時啟用,避免記憶體 /
+        # Qdrant 的重複寫與測試副作用。可由呼叫端顯式注入(測試 / R2)。
+        self.canonical = canonical if canonical is not None else maybe_get_canonical(self.store)
 
     # ── 召回 ──
     def _recall(self, bean: BeanRoast, mechanism: BrewMechanism, flavor: FlavorProfile,
@@ -135,6 +140,10 @@ class Engine:
         if record.grade == Grade.PREDICTION:
             record.confidence = min(record.confidence, 0.3)
         rid = self.store.upsert(record)
+        # 雙寫 canonical 真相層(向量為衍生物)。prediction 級為衍生物,不入真相、
+        # 不被 rebuild 復活;只有人類/外部真值(A/B/C)才進 canonical。
+        if self.canonical is not None and record.grade != Grade.PREDICTION:
+            self.canonical.append(record)
         return {"ok": True, "id": rid, "count": self.store.count(),
                 "note": "已寫入。prediction 級不參與方向投票。"}
 

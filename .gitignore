@@ -7,3 +7,7 @@ venv/
 .pytest_cache/
 .qdrant/
 *.log
+
+# 衍生物 / 產生的成品(canonical 真相用 R2 或自管路徑,不入庫;評測報告可重生)
+data/
+eval/report.json

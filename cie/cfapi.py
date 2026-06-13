@@ -8,9 +8,10 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from typing import Any, Dict, List, Optional
 
-from ._http import HttpError, get_json, post_json
+from ._http import HttpError, get_json, post_json, request_text
 
 CF_API_BASE = "https://api.cloudflare.com/client/v4"
 
@@ -112,3 +113,43 @@ class CloudflareClient:
             raise CloudflareError(str(e), getattr(e, "status", None),
                                   getattr(e, "body", "")) from e
         return self._unwrap(resp, "Vectorize info") or {}
+
+    # ── R2 物件存取(canonical JSONL 真相層) ──
+    # GET 回傳**原始物件 body**(非 v4 信封)故走 request_text;PUT 仍回 v4 信封,需驗 success。
+    def _r2_object_url(self, bucket: str, key: str) -> str:
+        safe_key = urllib.parse.quote(key, safe="")
+        return f"{CF_API_BASE}/accounts/{self.account_id}/r2/buckets/{bucket}/objects/{safe_key}"
+
+    def r2_get_object(self, bucket: str, key: str) -> Optional[str]:
+        """GET R2 物件原始文字;物件不存在(404)回 None。"""
+        url = self._r2_object_url(bucket, key)
+        try:
+            return request_text("GET", url, headers=self._headers,
+                                timeout_s=self.timeout_s, max_retries=self.max_retries)
+        except HttpError as e:
+            if getattr(e, "status", None) == 404:
+                return None
+            raise CloudflareError(str(e), getattr(e, "status", None),
+                                  getattr(e, "body", "")) from e
+
+    def r2_put_object(self, bucket: str, key: str, body: str,
+                      content_type: str = "application/x-ndjson") -> None:
+        """PUT(覆寫)R2 物件;body 為原始文字(canonical JSONL 全文)。
+
+        PUT 回 v4 信封(GET 才是原始 body),故驗 success——truth 層寫入不能
+        靜默吞 HTTP-200-but-success:false,否則「以為存了真相、其實沒存」。
+        """
+        url = self._r2_object_url(bucket, key)
+        headers = {**self._headers, "Content-Type": content_type}
+        try:
+            text = request_text("PUT", url, data=body.encode("utf-8"), headers=headers,
+                                timeout_s=self.timeout_s, max_retries=self.max_retries)
+        except HttpError as e:
+            raise CloudflareError(str(e), getattr(e, "status", None),
+                                  getattr(e, "body", "")) from e
+        if text:  # 有 body → 必為 v4 信封,驗 success(空 body 視同 HTTP 2xx 成功)
+            try:
+                resp = json.loads(text)
+            except ValueError:  # pragma: no cover - R2 PUT 理論上必回 JSON 信封
+                return
+            self._unwrap(resp, "R2 put object")

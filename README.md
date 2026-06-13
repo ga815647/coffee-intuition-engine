@@ -29,6 +29,8 @@ water(控制變數)┘        ▲
 | `cie/physics.py` | 三軌物理先驗 + TDS/EY→風味相關 |
 | `cie/embedding.py` | 可插拔嵌入:`local`(離線雜湊)/ `workers_ai`(bge-m3)/ `openai` / `voyage`;`get_embedder()` 工廠,缺金鑰自動退回 local |
 | `cie/store.py` | 可插拔向量庫:記憶體 / Qdrant / Vectorize;`get_store()` 工廠;機制硬過濾召回 |
+| `cie/canonical.py` | canonical 真相層:`LocalJsonlCanonical` / `R2Canonical`;`log_calibration`/`seed` 雙寫(Vectorize 不再無源) |
+| `cie/rebuild.py` | `python -m cie.rebuild`:讀 canonical → 當前嵌入器重嵌 → 重建向量索引 |
 | `cie/portability.py` | canonical JSONL 匯出/匯入;換模型或雲↔地重建索引(向量是衍生物) |
 | `cie/cfapi.py` | Cloudflare REST 用戶端(Workers AI run + Vectorize upsert/query) |
 | `cie/_http.py` | stdlib urllib HTTP(重試/逾時),零新依賴 |
@@ -47,6 +49,7 @@ pip install -r requirements.txt   # 雲端後端零新依賴(走 stdlib urllib)
 python -m cie.seed          # 灌種子
 python -m pytest -q         # 測試(雲端後端用假用戶端,離線可全綠)
 python -m cie.demo          # 端到端跑 recommend / predict / diagnose / method_swap
+python -m eval.run          # 盲測評測:留出豆先測再比真值,算 L3 MAE / 區間覆蓋 / 方向準確度
 
 # 啟動 MCP server
 python mcp_server.py
@@ -99,7 +102,15 @@ export_store(get_store(), "backup.jsonl")     # 全量匯出(需記憶體/Qdrant
 import_jsonl("backup.jsonl", get_store())      # 用「當前」嵌入器重嵌並寫入
 ```
 
-切換嵌入模型、換機器、雲↔地遷移,都從 JSONL 重建索引——絕不直接搬舊向量(不同模型的向量不可混用)。`seeds/anchors.jsonl` 本身就是 canonical 格式。Vectorize 後端不支援 `export_store`(metadata 不存全量 canonical),其真相來源應放 R2/D1 的 JSONL。
+切換嵌入模型、換機器、雲↔地遷移,都從 JSONL 重建索引——絕不直接搬舊向量(不同模型的向量不可混用)。`seeds/anchors.jsonl` 本身就是 canonical 格式。
+
+**Vectorize 後端的真相來源**:Vectorize 只存 sanitized metadata、無法自存全量 canonical,故 `log_calibration` / `seed` 會**雙寫 canonical sink**(`cie/canonical.py`:本地 `./data/canonical.jsonl`,或設 `CIE_R2_BUCKET` 改存 R2)。重建走:
+
+```bash
+python -m cie.rebuild   # 讀 canonical → 當前嵌入器重嵌 → 重建向量索引
+```
+
+記憶體 / Qdrant 後端自帶 `_canonical`,不另寫此檔(`maybe_get_canonical` 偵測後略過)。
 
 ## 狀態
 

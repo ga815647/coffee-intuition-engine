@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
+from .canonical import CanonicalStore, maybe_get_canonical
 from .schema import Record
 from .store import StoreBackend, get_store
 
@@ -26,14 +27,24 @@ def load_records(path: Path = SEED_PATH) -> List[Record]:
     return records
 
 
-def seed(store: StoreBackend | None = None, path: Path = SEED_PATH) -> int:
+def seed(store: StoreBackend | None = None, path: Path = SEED_PATH,
+         canonical: Optional[CanonicalStore] = None) -> int:
+    """灌種子到向量庫;若提供 canonical sink,同步 append 一份真相。
+
+    注意:再次 seed 會於 canonical 重複 append(JSONL 無依 id 去重);種子通常只灌一次。
+    """
     store = store or get_store()
     records = load_records(path)
     n = store.upsert_many(records)
+    if canonical is not None:
+        canonical.extend(records)
     return n
 
 
 if __name__ == "__main__":
     store = get_store()
-    n = seed(store)
-    print(f"已載入 {n} 筆 A 級種子;向量庫現有 {store.count()} 筆。")
+    # Vectorize 等無法自存 canonical 的後端需獨立 sink;記憶體/Qdrant 回 None。
+    canonical = maybe_get_canonical(store)
+    n = seed(store, canonical=canonical)
+    where = "" if canonical is None else "(已雙寫 canonical 真相層)"
+    print(f"已載入 {n} 筆 A 級種子;向量庫現有 {store.count()} 筆。{where}")

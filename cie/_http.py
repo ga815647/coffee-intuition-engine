@@ -58,19 +58,37 @@ def get_json(
     max_retries: int = 2,
 ) -> Dict[str, Any]:
     """GET 並回傳解析後的 JSON dict。"""
-    return _request("GET", url, data=None, headers=dict(headers or {}),
-                    timeout_s=timeout_s, max_retries=max_retries)
+    text = request_text("GET", url, headers=dict(headers or {}),
+                         timeout_s=timeout_s, max_retries=max_retries)
+    return json.loads(text) if text else {}
 
 
-def _request(method: str, url: str, *, data: Optional[bytes],
-             headers: Dict[str, str], timeout_s: float, max_retries: int) -> Dict[str, Any]:
+def request_text(
+    method: str,
+    url: str,
+    *,
+    data: Optional[bytes] = None,
+    headers: Optional[Dict[str, str]] = None,
+    timeout_s: float = 30.0,
+    max_retries: int = 2,
+) -> str:
+    """送出請求並回傳**原始文字** body(不做 JSON 解析)。
+
+    供 R2 物件存取等回傳非 JSON 信封的端點(canonical JSONL 即原始文字)。
+    重試政策同 JSON 路徑:4xx(429 除外)立即拋,429/5xx/連線錯誤退避重試。
+    """
     last_err: Optional[HttpError] = None
     for attempt in range(max_retries + 1):
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        req = urllib.request.Request(url, data=data, headers=dict(headers or {}), method=method)
         try:
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-                text = resp.read().decode("utf-8")
-            return json.loads(text) if text else {}
+                raw = resp.read()
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError as e:  # pragma: no cover - 需非 UTF-8 回應
+                # 真相層寧可拋 typed error 也不靜默用 replace 損壞資料;
+                # HttpError(RuntimeError)非以下 except 所捕,直接上拋由呼叫端轉 CloudflareError。
+                raise HttpError(f"{method} {url} → 回應非 UTF-8(無法解碼): {e}") from e
         except urllib.error.HTTPError as e:  # pragma: no cover - 需網路
             body = ""
             try:
@@ -86,3 +104,10 @@ def _request(method: str, url: str, *, data: Optional[bytes],
         if attempt < max_retries:  # pragma: no cover - 需網路
             time.sleep(0.5 * (2 ** attempt))
     raise last_err or HttpError(f"{method} {url} 失敗")
+
+
+def _request(method: str, url: str, *, data: Optional[bytes],
+             headers: Dict[str, str], timeout_s: float, max_retries: int) -> Dict[str, Any]:
+    text = request_text(method, url, data=data, headers=headers,
+                        timeout_s=timeout_s, max_retries=max_retries)
+    return json.loads(text) if text else {}

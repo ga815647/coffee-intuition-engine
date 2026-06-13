@@ -43,6 +43,13 @@ class Config:
     cf_timeout_s: float = 30.0
     cf_max_retries: int = 2
 
+    # ── Canonical 真相層(JSONL;向量為衍生物,可重嵌重建) ──
+    # 本地 JSONL 路徑(預設);Vectorize 後端必走此 sink 才不會「無源」。
+    canonical_path: str = "./data/canonical.jsonl"
+    # R2(選配):有 CF 金鑰 + bucket → 用 R2 物件存 canonical JSONL。
+    r2_bucket: str = ""
+    r2_canonical_key: str = "canonical.jsonl"
+
     # 後端覆寫(留空 = 自動偵測)
     store_backend_override: str = ""
 
@@ -66,6 +73,9 @@ class Config:
             workers_ai_embed_model=_get("CIE_WORKERS_AI_EMBED_MODEL", "@cf/baai/bge-m3"),
             cf_timeout_s=float(_get("CIE_CF_TIMEOUT_S", "30")),
             cf_max_retries=int(_get("CIE_CF_MAX_RETRIES", "2")),
+            canonical_path=_get("CIE_CANONICAL_PATH", "./data/canonical.jsonl"),
+            r2_bucket=_get("CIE_R2_BUCKET"),
+            r2_canonical_key=_get("CIE_R2_CANONICAL_KEY", "canonical.jsonl"),
             store_backend_override=_get("CIE_STORE_BACKEND"),
             notion_token=_get("CIE_NOTION_TOKEN"),
             notion_feedback_db=_get("CIE_NOTION_FEEDBACK_DB"),
@@ -91,6 +101,13 @@ class Config:
     def use_memory_store(self) -> bool:
         """Qdrant 後端是否用記憶體模式(無 url 即記憶體)。"""
         return not self.qdrant_url
+
+    @property
+    def canonical_backend(self) -> str:
+        """canonical 真相層後端:r2(有 CF 金鑰 + bucket)| local(預設 JSONL)。"""
+        if self.has_cf_creds and self.r2_bucket:
+            return "r2"
+        return "local"
 
 
 CONFIG = Config.from_env()

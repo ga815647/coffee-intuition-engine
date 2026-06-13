@@ -73,11 +73,12 @@ python mcp_server.py              # 啟動 MCP(stdio)
 - 接真嵌入:預設改 **Cloudflare Workers AI `@cf/baai/bge-m3`(多語,適合中文風味筆記)**;`embedding.py` 的 `Embedder` 介面加 Workers AI 後端(Worker binding 或 REST),`local` 雜湊版留作離線後備,Voyage/OpenAI 為選配。驗收:同義/中文豆況召回明顯優於雜湊版(加召回品質測試)。
 - **Cloudflare Vectorize 持久化(取代 Qdrant Cloud,免費額度覆蓋個人規模)**:`store.py` 的 `VectorStore` 介面加 **Vectorize 後端**(Worker binding 或 REST API);記憶體模式留作本地開發。canonical 記錄存 R2/D1(JSONL),向量索引可在 Vectorize 或本地重建。驗收:重啟後資料還在 + 可從 JSONL 重建索引。
 - 維度注意:bge-m3=1024、bge-base=768;Vectorize 免費 500 萬 stored dims(5000 筆×768≈384 萬,穩在免費內)。
+- ✅ **canonical 真相層(完成)**:`cie/canonical.py`(`LocalJsonlCanonical` / `R2Canonical`,雙寫)+ `cie/rebuild.py`(`python -m cie.rebuild`,從 canonical 用當前嵌入器重嵌重建)。`engine.log_calibration` / `seed` 對 Vectorize 等無法自存的後端走 canonical sink;`prediction` 級不入真相。Vectorize **不再無源**。詳見 `docs/DESIGN_v0.2.md` §15.1。
 
 **P1 — 把「直覺」做扎實**
 - 收縮升級:`retrieval.weighted_estimate` 由 `n/(n+k)` 近似改成層級貝氏(群組先驗=同機制+同處理法+同焙度帶)。驗收:少樣本時估計明顯往群組先驗收斂的單元測試。
 - Conformal/CQR:用 MAPIE 或自實作 split-conformal + 小樣本 Beta 修正(SSBC),取代經驗分位 stub;對味覺漂移用加權 conformal。驗收:留出集實測覆蓋 ≈ 名目(±)。
-- **盲測評測集(關鍵)**:建 `eval/`,對庫中沒有的豆先 `predict` → 人工盲評 → 算 L3 各軸 MAE/區間覆蓋,當回歸測試。沒有它就無法證明「越用越準」。
+- 🚧 **盲測評測集(關鍵,進行中)**:建 `eval/`,對庫中沒有的豆先 `predict` → 人工盲評 → 算 L3 各軸 MAE/區間覆蓋,當回歸測試。沒有它就無法證明「越用越準」。**已落地**:`eval/dataset.jsonl`(5 筆離線示例,涵蓋三機制)+ `python -m eval.run` 算 MAE/RMSE、conformal 區間覆蓋、**同機制**方向排序準確率,並含三道防洩漏(留出豆排除 + 結構性無子項回推 + 預測不寫回)。離線雜湊嵌入**不下 MAE 門檻**;真實準度待接 `workers_ai` 嵌入 + 真實資料(同一 harness 複用)。詳見 §15.2。
 
 **P2 — 資料與整合**
 - Notion 雙寫:`log_calibration` 同步寫 Notion 回饋 DB(讀 `CIE_NOTION_*`)+ 向量庫;夜間一致性校驗。
