@@ -1,22 +1,25 @@
-"""CIE remote MCP(streamable-HTTP)= **公開門:唯讀**(設計 §13/§16「兩扇門」)。
+"""CIE remote MCP(streamable-HTTP)= **HTTP 公開可寫端點(member 受限)**(設計 §13/§16「三層」)。
 
-兩扇門:本檔是**公開門**——claude.ai / 分享對象走這,**只掛讀工具、無任何寫入路徑**。
-寫入(校準回饋)只在**私有門**(本機 stdio `mcp_server.py`,owner)。所有檢索 / 收縮 /
-conformal / 機制三軌 / 物理先驗都留在既有 cie.* 模組,本檔只做 HTTP 邊緣:
+三層:本檔是**網路面**——claude.ai / 分享對象走這。掛讀工具 + `log_calibration`(寫),但
+寫入受 member 治理**強制隔離**:只能落呼叫者**自己的 self 客製層**、`grade` 上限 B、**寫不到
+global / 他人 self**。`global` 客觀真值與 self→global 晉升只在**本機 stdio owner 門**
+(`mcp_server.py`)。所有檢索 / 收縮 / conformal / 機制三軌 / 物理先驗都留在既有 cie.* 模組,
+本檔只做 HTTP 邊緣:
 
-  - 只註冊讀工具(`register_tools(..., include_writes=False)`):query/recommend/predict/
-    diagnose、method_swap。`log_calibration` 根本不在 HTTP 暴露 → 網路上寫不進去。
+  - 掛讀工具 + 寫工具(`register_tools(..., include_writes=True, include_promotion=False)`):
+    query/recommend/predict/diagnose、method_swap、log_calibration。**晉升工具不掛 HTTP**
+    → 網路上沒有寫 global / 晉升的路徑。
   - 雙 token 認證:`Authorization: Bearer <token>` 與 `?token=`/`?key=` 皆可
     (claude.ai 網頁連接器只能用 query 那條);缺 / 錯 → 401;未設密鑰 fail-closed。
-    **HTTP 一切 token 皆唯讀**;token 外洩最壞只是被讀,global 共享真相不可從網路面污染。
+    token → member(具命名空間,寫自己的 self)或 reader(純讀)。**global 永無對應 token**。
   - CORS 鎖 `*.claude.ai`;`/health` + `/`(public 狀態)。
-  - 每請求把 token 解析成 reader Principal 並設入 contextvar;工具據此套讀範圍。
+  - 每請求把 token 解析成 member / reader Principal 並設入 contextvar;工具據此套讀範圍 / 寫入閘。
     用 streamable-http **stateless** 模式:每請求自含、與工具同一 async task,principal 必可見。
 
 本地跑:
     uvicorn server_http:app --host 0.0.0.0 --port 8000
     # 或   python server_http.py
-連接(claude.ai 新增自訂連接器):URL = https://<host>/mcp?token=<CIE_MCP_AUTH_TOKEN>(唯讀)
+連接(claude.ai 新增自訂連接器):URL = https://<host>/mcp?token=<CIE_MCP_AUTH_TOKEN>(member)
 """
 from __future__ import annotations
 
@@ -130,24 +133,25 @@ def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = 
     """
     from mcp.server.fastmcp import FastMCP
 
-    # 安全不變式(load-bearing,防禦縱深):每請求 reader principal 走 contextvar,須在 **stateless**
-    # streamable-http 下才保證可見——每請求自含、與工具同一 async 上下文。**有狀態**模式
+    # 安全不變式(load-bearing,寫入隔離命門):每請求 member / reader principal 走 contextvar,須在
+    # **stateless** streamable-http 下才保證可見——每請求自含、與工具同一 async 上下文。**有狀態**模式
     # (stateless=False)會把工具派發跑進「該 session 第一個請求建立的長壽任務」,後續請求中介層設的
-    # principal 看不到 → 工具退回 contextvar 預設 = LOCAL_PRINCIPAL(owner,can_write=True)。HTTP 雖
-    # 不掛寫工具(第一道防線),但「reader principal 確實抵達工具」是 can_write=False 防禦縱深的前提;
+    # principal 看不到 → 工具退回 contextvar 預設 = LOCAL_PRINCIPAL(**owner、可寫 global、無 grade 上限**)。
+    # 這會讓網路呼叫者取得 owner 權限、繞過 member confinement 而**寫到 global**——直接瓦解三層寫入隔離。
     # 故本層 principal 模型不支援有狀態,**fail-closed 拒啟動**。
     if not config.mcp_stateless:
         raise RuntimeError(
             "CIE remote MCP 僅支援 stateless streamable-http(CIE_MCP_STATELESS=1)。"
-            "有狀態模式下每請求 reader principal(contextvar)在 session 任務內看不到,工具會退回 "
-            "owner 預設(can_write=True),瓦解唯讀門的防禦縱深(見 server_http 安全註記、DESIGN §16.3)。"
-            "請設 CIE_MCP_STATELESS=1。"
+            "有狀態模式下每請求 member / reader principal(contextvar)在 session 任務內看不到,工具會退回 "
+            "owner 預設(可寫 global),網路呼叫者將繞過 member confinement 寫到 global(見 server_http "
+            "安全註記、DESIGN §16.3)。請設 CIE_MCP_STATELESS=1。"
         )
 
     eng = engine or Engine()
     mcp = FastMCP("coffee-intuition-engine", stateless_http=config.mcp_stateless)
-    # 公開門唯讀:不掛 log_calibration(寫工具)。寫入只在 stdio(mcp_server.py,include_writes 預設 True)。
-    register_tools(mcp, eng, include_writes=False)
+    # 網路面:掛讀工具 + log_calibration(member 受限寫:confinement + grade≤B)。
+    # **不掛晉升工具**(include_promotion=False)→ 網路無 self→global / global 寫入路徑;晉升只在 stdio。
+    register_tools(mcp, eng, include_writes=True, include_promotion=False)
 
     if auto_seed and config.store_backend == "memory":
         try:
@@ -157,7 +161,7 @@ def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = 
             logger.warning("auto_seed 失敗(忽略)。", exc_info=True)
 
     if not auth_is_configured(config):
-        logger.warning("未設定任何 MCP 唯讀 token(CIE_MCP_AUTH_TOKEN / CIE_MCP_GUEST_TOKENS);"
+        logger.warning("未設定任何 MCP token(CIE_MCP_AUTH_TOKEN / CIE_MCP_GUEST_TOKENS);"
                        "所有 /mcp 請求將 fail-closed 回 401。")
 
     app = mcp.streamable_http_app()

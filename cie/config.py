@@ -57,12 +57,12 @@ class Config:
     notion_token: str = ""
     notion_feedback_db: str = ""
 
-    # ── Remote MCP(HTTP 公開門 = 唯讀,§13/§16「兩扇門」) ──
-    # 主要唯讀 token(日常 + 分享都用這條;對應 Aiden 的 MCP_AUTH_TOKEN);Bearer 與 ?token= 皆可。
-    # **HTTP 一切 token 皆唯讀**;寫入(校準)只在本機 Claude Code stdio(owner),不需網路 token。
+    # ── Remote MCP(HTTP = member 受限寫入,§13/§16「三層」) ──
+    # 你個人 member token(日常 claude.ai;對應 Aiden 的 MCP_AUTH_TOKEN);Bearer 與 ?token= 皆可。
+    # 解析為 member,寫入**強制落自己的 self 客製層**、grade 上限 B;寫不到 global(global / 晉升只在本機 stdio)。
     mcp_auth_token: str = ""
-    # 額外唯讀 token(JSON `{token:label}` 物件或 `["token",...]` 陣列);供個別發放 / 撤銷。皆唯讀。
-    # 例:{"tok_alice":"alice","tok_bob":"bob"}(值僅作稽核標籤,不再是寫入命名空間)。
+    # 額外 token(JSON `{token:user_id}` 物件:值=member 寫入命名空間;或 `["token",...]` 陣列:無命名空間→reader)。
+    # 例:{"tok_alice":"alice","tok_bob":"bob"}(各寫自己的 self 層、硬隔離);值為保留字 global/self 會被拒。
     mcp_guest_tokens: str = ""
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8000

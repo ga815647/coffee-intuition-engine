@@ -1,8 +1,9 @@
-"""Remote MCP 公開門(HTTP)= 唯讀:雙 token 認證、CORS 鎖 claude.ai、/health、401,
-且**只掛讀工具**(無寫入路徑)。設計 §13/§16「兩扇門」。
+"""Remote MCP 網路面(HTTP)傳輸層:雙 token 認證、CORS 鎖 claude.ai、/health、401,
+且**掛 member 受限寫工具(log_calibration)但不掛晉升工具**。設計 §13/§16「三層 + 人工晉升」。
 
 用 Starlette TestClient(httpx,離線、不觸真網路)打 ASGI app。傳輸層關注點在此;
-工具治理邏輯在 test_mcp_gate.py。MCP 協定本身的 JSON-RPC 握手在 tools/smoke_http.py 實打實驗。
+member confinement / 讀隔離 / 晉升等治理邏輯在 test_mcp_gate.py。MCP 協定本身的
+JSON-RPC 握手在 tools/smoke_http.py 實打實驗。
 """
 from __future__ import annotations
 
@@ -20,8 +21,8 @@ from starlette.testclient import TestClient  # noqa: E402
 
 import server_http  # noqa: E402
 
-PRIMARY = "primary-read-token"          # CIE_MCP_AUTH_TOKEN:主要唯讀 token
-EXTRA = "extra-read-token"              # CIE_MCP_GUEST_TOKENS 內的額外唯讀 token
+PRIMARY = "primary-member-token"        # CIE_MCP_AUTH_TOKEN:你個人 member token(寫自己的 self)
+EXTRA = "extra-member-token"            # CIE_MCP_GUEST_TOKENS 內的訪客 member token(寫 alice 命名空間)
 
 
 def _cfg(**kw):
@@ -59,18 +60,20 @@ def test_root_public_no_auth(client):
     assert r.json()["name"] == "coffee-intuition-engine"
 
 
-# ────────────────────────────── 公開門唯讀:只掛讀工具 ──────────────────────────────
+# ────────────────────────────── 網路面:讀 + member 受限寫,但無晉升 ──────────────────────────────
 
-def test_http_registers_only_read_tools():
-    """公開門(HTTP)**不掛 log_calibration**(寫工具);只有 query / method_swap(讀)。
-    這是『網路上無寫入路徑』的第一道(§16「兩扇門」)。"""
+def test_http_registers_member_write_but_no_promotion():
+    """網路面(HTTP)掛讀工具 + `log_calibration`(member 受限寫),但**不掛晉升工具**。
+    晉升 / 寫 global 只在本機 stdio owner 門 → 網路上沒有寫 global 的路徑(§16「三層」)。"""
     _, mcp = server_http.build_app(config=_cfg(), engine=Engine(VectorStore()), auto_seed=False)
     names = sorted(t.name for t in asyncio.run(mcp.list_tools()))
-    assert "log_calibration" not in names
-    assert names == ["predict_method_swap", "query_flavor_map"]
+    assert names == ["log_calibration", "predict_method_swap", "query_flavor_map"]
+    # 晉升工具(self→global)永不在 HTTP 出現。
+    assert "promote_customization" not in names
+    assert "list_customizations" not in names
 
 
-# ────────────────────────────── 認證閘(HTTP 一切 token 唯讀) ──────────────────────────────
+# ────────────────────────────── 認證閘(token → member / reader) ──────────────────────────────
 
 def test_mcp_without_token_is_401(client):
     r = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
@@ -87,7 +90,7 @@ def test_mcp_bad_token_is_401(client):
 
 
 def test_bearer_header_token_passes_auth(client):
-    # 有效 Bearer(主要唯讀 token)→ 通過認證閘(不再是 401;進到 MCP 層)。
+    # 有效 Bearer(個人 member token)→ 通過認證閘(不再是 401;進到 MCP 層)。
     r = client.post(
         "/mcp",
         headers={"Authorization": f"Bearer {PRIMARY}",
@@ -109,8 +112,8 @@ def test_query_param_token_passes_auth(client):
     assert r.status_code != 401
 
 
-def test_key_query_param_alias_with_extra_read_token(client):
-    # ?key= 別名 + 額外唯讀 token(供個別撤銷)皆通過。
+def test_key_query_param_alias_with_extra_member_token(client):
+    # ?key= 別名 + 訪客 member token(寫 alice 命名空間;供個別撤銷)皆通過。
     r = client.post(
         f"/mcp?key={EXTRA}",
         headers={"Accept": "application/json, text/event-stream",
@@ -164,28 +167,32 @@ def test_bare_options_without_origin_is_401(client):
     assert r.json()["error"] == "unauthorized"
 
 
-# ────────────────────────────── 安全不變式:stateless 為前提 ──────────────────────────────
+# ────────────────────────────── 安全不變式:stateless 為前提(命門) ──────────────────────────────
 
 def test_build_app_refuses_stateful_mode():
-    """有狀態模式下 per-request reader principal(contextvar)看不到 → 工具退回 owner 預設,
-    瓦解唯讀門防禦縱深。build_app 須 fail-closed 拒啟動(見 server_http、DESIGN §16.3)。"""
+    """有狀態模式下 per-request member principal(contextvar)看不到 → 工具退回 owner 預設
+    (可寫 global),網路呼叫者繞過 member confinement 寫到 global。build_app 須 fail-closed
+    拒啟動(見 server_http、DESIGN §16.3)。"""
     with pytest.raises(RuntimeError, match="stateless"):
         server_http.build_app(config=_cfg(mcp_stateless=False),
                               engine=Engine(VectorStore()), auto_seed=False)
 
 
-# ────────────────────────────── stdio 私有門(唯一寫入,零回歸) ──────────────────────────────
+# ────────────────────────────── stdio owner 門(唯一寫 global / 晉升,零回歸) ──────────────────────────────
 
 def test_stdio_entry_registers_all_tools_and_owner_principal():
-    """私有門 stdio(mcp_server)註冊**全部**工具(含 log_calibration 寫工具)、自動 seed、
-    預設身分 = LOCAL_PRINCIPAL(owner、can_write、不施讀過濾)→ 唯一寫入門,零回歸。"""
+    """owner 門 stdio(mcp_server)註冊**全部 5 個**工具(含寫工具 + 晉升工具)、自動 seed、
+    預設身分 = LOCAL_PRINCIPAL(owner、can_write、不施讀過濾)→ 唯一能寫 global / 晉升,零回歸。"""
     import importlib
 
     import mcp_server
     importlib.reload(mcp_server)
 
     names = sorted(t.name for t in asyncio.run(mcp_server.mcp.list_tools()))
-    assert names == ["log_calibration", "predict_method_swap", "query_flavor_map"]
+    assert names == [
+        "list_customizations", "log_calibration", "predict_method_swap",
+        "promote_customization", "query_flavor_map",
+    ]
     assert mcp_server._engine.store.count() > 0  # 自動 seed
 
     from cie.mcp_principal import current_principal
