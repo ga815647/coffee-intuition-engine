@@ -39,6 +39,7 @@ from cie.mcp_principal import (
     auth_is_configured, reset_principal, resolve_principal_from_config, set_principal,
 )
 from cie.mcp_tools import register_tools
+from cie.rebuild import prime_serving_index
 from cie.seed import seed as seed_store
 
 logger = logging.getLogger("cie.server_http")
@@ -128,8 +129,13 @@ def _health_handler(config, mcp_path: str):
 def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = True):
     """組裝 ASGI app。回傳 (app, mcp)。
 
-    auto_seed:僅在記憶體後端、且庫空時灌 6 筆冷啟動種子(本地 dev / smoke 便利)。
-    正式部署(Vectorize)請走 cie.bootstrap + cie.rebuild,不在此自動 seed。
+    冷啟動載入(每容器一次,非每請求):
+      - **生產自幹 index(記憶體後端 + R2 canonical)**:從共用 R2 canonical 重嵌重建
+        in-memory 索引(`prime_serving_index`);同實例後續請求重用,scale-to-zero 後下次
+        冷啟動再建。R2 為單一共用真相,owner 本機寫的 global 下次冷啟動讀得到。
+      - **離線開發(memory + 本地 canonical)**:`auto_seed` 為真且庫空時灌 6 筆冷啟動種子。
+
+    auto_seed 僅影響離線開發路徑;生產走 cie.bootstrap(→R2)+ 冷啟動重建,不灌 6 筆種子。
     """
     from mcp.server.fastmcp import FastMCP
 
@@ -153,7 +159,19 @@ def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = 
     # **不掛晉升工具**(include_promotion=False)→ 網路無 self→global / global 寫入路徑;晉升只在 stdio。
     register_tools(mcp, eng, include_writes=True, include_promotion=False)
 
-    if auto_seed and config.store_backend == "memory":
+    # 生產自幹 index:冷啟動從共用 R2 canonical 重建 in-memory 索引(memory+R2 才觸發)。
+    try:
+        primed = prime_serving_index(eng, config)
+    except Exception:  # 冷啟動重建失敗不該讓容器起不來(/health 仍綠、查詢退回物理先驗)。
+        primed = None
+        logger.error("冷啟動從 R2 canonical 重建失敗;以現有索引續行。", exc_info=True)
+    if primed is not None:
+        logger.info("冷啟動:從 R2 canonical 重建 in-memory 索引 %d 筆(嵌入器 %s)。",
+                    primed, eng.store.model_id)
+        if primed == 0:
+            logger.warning("R2 canonical 為空;請先在本機 `python -m cie.bootstrap`(→R2)灌策展語料。")
+    elif auto_seed and config.store_backend == "memory":
+        # 離線開發後備:庫空灌 6 筆冷啟動種子(正式載入走 bootstrap + 冷啟動重建)。
         try:
             if eng.store.count() == 0:
                 seed_store(eng.store)

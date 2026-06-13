@@ -41,6 +41,24 @@ def rebuild(store: Optional[StoreBackend] = None,
     return import_records(records, store)
 
 
+def prime_serving_index(engine, config=CONFIG) -> Optional[int]:
+    """冷啟動載入:把共用 canonical(R2)重建進 `engine` 的 in-memory 索引。回傳重建筆數。
+
+    僅在**生產自幹 index 組合**(記憶體後端 + R2 canonical)觸發。in-memory 索引在
+    Cloud Run scale-to-zero / 重啟後丟失,R2 是單一共用真相,故每個容器冷啟動時一次性
+    從 R2 重嵌重建即可(同實例後續請求重用)。owner 本機 stdio 同樣用此載入,讀得到
+    global 全量、可審查晉升。
+
+    非該組合(離線開發、Qdrant、Vectorize 等)回 `None`——由呼叫端決定是否改灌冷啟動種子。
+    用 duck-typed `engine`(只取 `engine.store` / `engine.canonical`),不綁 Engine 型別。
+    """
+    if (config.store_backend == "memory"
+            and config.canonical_backend == "r2"
+            and getattr(engine, "canonical", None) is not None):
+        return rebuild(store=engine.store, canonical=engine.canonical, config=config)
+    return None
+
+
 def main() -> None:
     for stream in (sys.stdout, sys.stderr):  # Windows 主控台 UTF-8
         try:

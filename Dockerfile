@@ -1,19 +1,21 @@
 # CIE remote MCP(streamable-http)— host-agnostic 容器。
-# 任何能跑容器的平台皆可:Fly / Railway / Render / Cloud Run / VPS。不綁單一供應商。
+# 任何能跑容器的平台皆可:Cloud Run(本輪生產目標)/ Fly / Railway / Render / VPS。不綁單一供應商。
 #
 # 建置:  docker build -t cie-mcp .
-# 跑:    docker run --rm -p 8000:8000 --env-file .env cie-mcp
+# 本地跑:docker run --rm -p 8000:8000 --env-file .env cie-mcp   # 未注入 $PORT → 預設 8000
 # 連接:  https://<host>/mcp?token=<CIE_MCP_AUTH_TOKEN>(claude.ai 自訂連接器)
 #
-# 嵌入器恆 workers_ai + 向量庫 vectorize 時,runtime 僅需 stdlib+pydantic+REST(無重 ML);
-# numpy/qdrant 仍裝以支援本地 / Qdrant 後端,映像仍輕。
+# 生產(本輪):記憶體自幹 index + R2 共用 canonical + Workers AI 嵌入;runtime 僅需
+# stdlib+pydantic+REST(嵌入 / canonical 走 REST),numpy/qdrant 撐記憶體向量庫,映像仍輕。
 FROM python:3.12-slim
 
+# **不**硬寫 CIE_MCP_PORT:Cloud Run 等平台以 $PORT(預設 8080)注入監聽埠,cie/config.py
+# 以 `CIE_MCP_PORT or $PORT or 8000` coalesce。硬寫 CIE_MCP_PORT 會蓋掉 $PORT → 容器監聽
+# 錯埠、Cloud Run 路由不到。本地 docker run 未注入 $PORT 時自然退回 8000。
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    CIE_MCP_HOST=0.0.0.0 \
-    CIE_MCP_PORT=8000
+    CIE_MCP_HOST=0.0.0.0
 
 WORKDIR /app
 

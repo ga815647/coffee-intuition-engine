@@ -123,6 +123,8 @@ class VectorStore:
         return record.id
 
     def upsert_many(self, records: List[Record]) -> int:
+        # 契約:呼叫端須先對 id 去重(見 portability.import_records)。本法不保證 batch 內
+        # 同 id 的勝出者——避免依賴後端 batch upsert 的隱性語意(換後端不致靜默回退)。
         qm = self._qm
         if not records:
             return 0

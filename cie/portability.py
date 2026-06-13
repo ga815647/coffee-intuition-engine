@@ -45,12 +45,21 @@ def read_jsonl(path: PathLike) -> List[Record]:
 
 
 def import_records(records: List[Record], store) -> int:
-    """用 store 的『當前嵌入器』重新嵌入 records → upsert。回傳寫入筆數。
+    """用 store 的『當前嵌入器』重新嵌入 records → upsert。回傳寫入(去重後)筆數。
 
     換模型 / 換後端 / 重建索引的核心:**一律重嵌、不搬舊向量**(嵌入器一致性鐵則)。
     來源可以是 JSONL 路徑(`import_jsonl`)或 canonical 真相層(`cie.rebuild`)。
+
+    **同 id 去重(保留最後一筆)**:canonical 是 append-only,晉升(`promote_customization`
+    就地同 id 改寫 self→global)與極少數「canonical.append 已成功、隨後 store.upsert 拋例外傳播,
+    呼叫端以同一筆(同 id)重試」會讓同一 id 在 canonical 出現多次(以不同 id 重試則是近似重複、
+    非去重對象)。重建時以**最後一筆為準**(後寫者勝 = 晉升後 / 修正後的
+    版本),在此**明確去重**而非依賴後端 batch upsert 的隱性語意——換後端 / 換版本時,
+    晉升過的 global 記錄不致靜默回退成舊的 self 版本(見 DESIGN §15.1)。
     """
-    return store.upsert_many(records)
+    # dict 同 key 後賦值覆寫、保留首次出現位置 → 每個 id 取「最後一筆」、順序穩定。
+    deduped = list({r.id: r for r in records}.values())
+    return store.upsert_many(deduped)
 
 
 def import_jsonl(path: PathLike, store) -> int:

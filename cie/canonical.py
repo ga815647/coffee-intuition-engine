@@ -160,11 +160,22 @@ def get_canonical(config=CONFIG) -> CanonicalStore:
 
 
 def maybe_get_canonical(store, config=CONFIG) -> Optional[CanonicalStore]:
-    """只有當向量後端**無法自存 canonical** 時才回傳獨立 sink,否則 None。
+    """回傳該後端需要的獨立 canonical sink,否則 None。
 
-    記憶體 / Qdrant 後端在 payload 內保留 `_canonical`(`store.iter_records` 可無損
-    列舉),不需重複寫;Vectorize 後端只存精簡 metadata,務必走 canonical sink。
+    兩種情況需要 sink:
+      1. **外部持久 canonical(R2)已設定** → 一律掛上,即便後端有 `iter_records`。
+         理由:生產自幹 index 用記憶體後端(`CIE_STORE_BACKEND=memory`),其 `_canonical`
+         payload **不跨行程持久化**(Cloud Run scale-to-zero / 重啟即丟)。R2 是單一共用
+         真相,owner 本機 stdio 寫 global、member 經 HTTP 寫自有 self 都落同一個 R2 bucket,
+         冷啟動再從 R2 重建(見 `rebuild.prime_serving_index`)。漏掉這條,member 的寫入會
+         在 scale-to-zero 前丟失。
+      2. **後端無法自存 canonical(Vectorize,無 `iter_records`)** → 必須有 sink 才不「無源」。
+
+    其餘(離線開發:記憶體 / Qdrant + 本地 canonical)後端自存 `_canonical`,回 None
+    避免重複寫與測試副作用(不會憑空寫出 `./data/canonical.jsonl`)。
     """
+    if config.canonical_backend == "r2":
+        return get_canonical(config)
     if hasattr(store, "iter_records"):
         return None
     return get_canonical(config)

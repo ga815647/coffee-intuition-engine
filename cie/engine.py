@@ -142,11 +142,13 @@ class Engine:
                     "error": "A 級校準須附 protocol(人類感官真值來源,如 SCA_cupping)。"}
         if record.grade == Grade.PREDICTION:
             record.confidence = min(record.confidence, 0.3)
-        rid = self.store.upsert(record)
-        # 雙寫 canonical 真相層(向量為衍生物)。prediction 級為衍生物,不入真相、
-        # 不被 rebuild 復活;只有人類/外部真值(A/B/C)才進 canonical。
+        # 持久化順序(load-bearing):先把真相落到 canonical(R2),確認後才更新**易失的**
+        # in-memory 索引——「回 success ⟹ R2 已有」,撐過 Cloud Run scale-to-zero(member
+        # 寫入不丟)。canonical.append 失敗會拋例外、store.upsert 不執行,呼叫端不會收到假成功。
+        # prediction 級為衍生物,不入真相、不被 rebuild 復活;只有人類/外部真值(A/B/C)才進。
         if self.canonical is not None and record.grade != Grade.PREDICTION:
             self.canonical.append(record)
+        rid = self.store.upsert(record)
         return {"ok": True, "id": rid, "count": self.store.count(),
                 "note": "已寫入。prediction 級不參與方向投票。"}
 
