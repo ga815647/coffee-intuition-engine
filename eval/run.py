@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from cie.config import CONFIG, Config
+from cie.embedding import CachingEmbedder, get_embedder
 from cie.engine import Engine
 from cie.portability import read_jsonl
 from cie.schema import FLAVOR_AXES, Record
@@ -86,10 +87,13 @@ def _holdout_signature(r: Record) -> tuple:
     )
 
 
-def _isolated_memory_store(config: Config) -> VectorStore:
-    """強制記憶體模式的獨立 store,隔離正式索引(評測零副作用)。"""
+def _isolated_memory_store(config: Config, embedder=None) -> VectorStore:
+    """強制記憶體模式的獨立 store,隔離正式索引(評測零副作用)。
+
+    可注入共用嵌入器(CachingEmbedder),讓 k-fold 跨折共用同一嵌入快取。
+    """
     iso = replace(config, qdrant_url="", qdrant_api_key="", store_backend_override="memory")
-    return VectorStore(iso)
+    return VectorStore(iso, embedder=embedder)
 
 
 def build_library_store(holdout_ids: set, config: Config = CONFIG,
@@ -280,6 +284,10 @@ def run_cv_eval(k: int = DEFAULT_K, config: Config = CONFIG,
     eligible = [r for r in corpus if r.grade.value in HOLDOUT_GRADES]  # C 不可當 holdout
     folds = _stratified_folds(eligible, k)
 
+    # 跨折共用一個快取嵌入器:同一筆語料在 k-1 折的召回庫重複出現,快取把
+    # 雲端(workers_ai)嵌入呼叫降到 ~1/k。鍵含 model_id(鐵則 §14.5,不跨模型混用)。
+    shared_embedder = CachingEmbedder(get_embedder(config))
+
     all_per_record: List[Dict] = []
     ids_excluded = no_ev_leak = not_written = True
     embedder: Optional[str] = None
@@ -292,7 +300,7 @@ def run_cv_eval(k: int = DEFAULT_K, config: Config = CONFIG,
         holdout_sigs = {_holdout_signature(h) for h in fold}
         holdout_ids = {h.id for h in fold}
         library = [r for r in corpus if _holdout_signature(r) not in holdout_sigs]
-        store = _isolated_memory_store(config)
+        store = _isolated_memory_store(config, embedder=shared_embedder)
         store.upsert_many(library)
         embedder = store.model_id
         before = store.count()
@@ -331,6 +339,7 @@ def run_cv_eval(k: int = DEFAULT_K, config: Config = CONFIG,
             "c_grade_never_holdout": all(r["grade"] in HOLDOUT_GRADES for r in all_per_record),
         },
         "fold_summaries": fold_summaries,
+        "embed_cache": shared_embedder.cache_info(),  # size/hits/misses:驗證跨折去重生效
         "note": "離線雜湊嵌入數值僅示意;看分機制方向與覆蓋,不看絕對 MAE。",
     }
 

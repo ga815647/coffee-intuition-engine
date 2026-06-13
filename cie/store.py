@@ -79,13 +79,14 @@ class VectorStore:
     同時作為向後相容的型別:既有程式 `VectorStore()` 仍取得 Qdrant/記憶體後端。
     """
 
-    def __init__(self, config=CONFIG):
+    def __init__(self, config=CONFIG, embedder=None):
         from qdrant_client import QdrantClient  # 延遲匯入:Vectorize-only 部署可不裝
         from qdrant_client.http import models as qm
 
         self._qm = qm
         self.config = config
-        self.embedder = get_embedder(config)
+        # 可注入嵌入器(如 CachingEmbedder),供 eval 跨折共用快取;留空則依設定建立。
+        self.embedder = embedder or get_embedder(config)
         self.model_id = self.embedder.model_id
         self.collection = config.collection
         if config.use_memory_store:
@@ -224,11 +225,12 @@ class VectorizeStore:
     _TOPK_CAP = 50
     _UPSERT_BATCH = 1000
 
-    def __init__(self, config=CONFIG, client=None):
+    def __init__(self, config=CONFIG, client=None, embedder=None):
         from .cfapi import CloudflareClient
         self.config = config
         self.index = config.vectorize_index
-        self.embedder = get_embedder(config)
+        # 可注入嵌入器(對稱於 VectorStore);留空則依設定建立。
+        self.embedder = embedder or get_embedder(config)
         self.model_id = self.embedder.model_id
         self.client = client or CloudflareClient(
             config.cf_account_id, config.cf_api_token,

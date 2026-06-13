@@ -88,6 +88,14 @@ def test_cv_folds_stratified_balanced():
         assert max(counts) - min(counts) <= 1  # round-robin 分層:各折該機制數差 ≤ 1
 
 
+def test_cv_embed_cache_reused_across_folds(cv):
+    """跨折共用快取生效:hits>0(同一語料在 k-1 折重複出現被快取攔下),
+    且現存條目數 ≤ 語料筆數(每唯一文字最多嵌一次)。"""
+    ec = cv["embed_cache"]
+    assert ec["hits"] > 0                    # 確有跨折/批內命中(否則沒省到呼叫)
+    assert ec["size"] <= cv["corpus_size"] + cv["n_holdout"]  # 唯一文字數有上界
+
+
 def test_cv_fold_split_is_deterministic():
     """切折只靠內容指紋,不靠隨機 uuid:兩次獨立載入應得相同(內容)分割。"""
     a = _stratified_folds(_eligible(), 5)

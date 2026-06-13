@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from typing import List, Protocol, runtime_checkable
+from typing import Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from ._http import HttpError, post_json
 from .cfapi import CloudflareClient, CloudflareError
@@ -128,6 +128,50 @@ class WorkersAIEmbedder:
                 raise EmbeddingError(f"Workers AI data 列非向量:{str(row)[:120]}")
             vecs.append([float(x) for x in row])
         return vecs
+
+
+# ────────────────────────────── 快取裝飾器(去重複嵌入) ──────────────────────────────
+
+class CachingEmbedder:
+    """以文字為鍵的記憶體快取,包住任一 `Embedder`(去重複嵌入呼叫)。
+
+    用途:k-fold CV 跨折會對同一筆語料重複嵌入(同一文字在 k-1 折的召回庫都出現),
+    共用一個 `CachingEmbedder` 實例即可把雲端(workers_ai)嵌入呼叫降到 ~1/k。
+
+    鐵則(§14.5)守住:**快取鍵含 `model_id`**——不同模型的向量空間不可混用,
+    故即便外部共用同一 `cache` dict 餵給不同模型的 wrapper,也絕不互相污染。
+    `embed` 一律走 `embed_batch` 單一路徑,確保兩條入口拿到一致向量。
+    """
+
+    def __init__(self, inner: Embedder, cache: Optional[Dict[Tuple[str, str], List[float]]] = None):
+        self.inner = inner
+        self.dim = inner.dim
+        self.model_id = inner.model_id  # 對外與內層一致(store/eval 讀此判斷嵌入器)
+        self._cache: Dict[Tuple[str, str], List[float]] = cache if cache is not None else {}
+        self._hits = 0
+        self._misses = 0
+
+    def _key(self, text: str) -> Tuple[str, str]:
+        return (self.model_id, text)  # 鐵則:model_id 入鍵,跨模型不共用向量
+
+    def embed(self, text: str) -> List[float]:
+        return self.embed_batch([text])[0]
+
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        missing = [t for t in dict.fromkeys(texts) if self._key(t) not in self._cache]
+        if missing:
+            vecs = self.inner.embed_batch(missing)  # 只嵌入未命中(且批內去重)
+            for t, v in zip(missing, vecs):
+                self._cache[self._key(t)] = v
+        self._misses += len(missing)
+        self._hits += len(texts) - len(missing)
+        return [self._cache[self._key(t)] for t in texts]
+
+    def cache_info(self) -> Dict[str, int]:
+        """快取統計(觀測 / 測試用):命中、未命中、現存條目數。"""
+        return {"size": len(self._cache), "hits": self._hits, "misses": self._misses}
 
 
 # ────────────────────────────── 選配:OpenAI / Voyage(REST) ──────────────────────────────

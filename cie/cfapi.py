@@ -95,6 +95,20 @@ class CloudflareClient:
         url = self._vectorize_url(index, "delete_by_ids")
         return self._unwrap(self._post(url, payload={"ids": ids}), "Vectorize delete_by_ids")
 
+    def vectorize_create_index(self, index: str, dimensions: int, metric: str = "cosine",
+                               description: str = "") -> Dict[str, Any]:
+        """POST /vectorize/v2/indexes 建立索引(v2 body 用 config.dimensions/metric)。
+
+        索引已存在時上游回 success=false → CloudflareError;呼叫端可視 body 為冪等忽略。
+        wrangler 在本機 node fetch 失敗時,此 REST 路徑為等效落地(與引擎同一 HTTP 客戶端)。
+        """
+        url = f"{CF_API_BASE}/accounts/{self.account_id}/vectorize/v2/indexes"
+        payload: Dict[str, Any] = {"name": index,
+                                   "config": {"dimensions": dimensions, "metric": metric}}
+        if description:
+            payload["description"] = description
+        return self._unwrap(self._post(url, payload=payload), "Vectorize create index")
+
     def vectorize_create_metadata_index(self, index: str, property_name: str,
                                         index_type: str = "string") -> Dict[str, Any]:
         url = self._vectorize_url(index, "metadata_index/create")
