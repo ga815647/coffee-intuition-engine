@@ -8,6 +8,11 @@ venv/
 .qdrant/
 *.log
 
-# 衍生物 / 產生的成品(canonical 真相用 R2 或自管路徑,不入庫;評測報告可重生)
-data/
+# 可重生衍生物 / 運行期快取(不入庫)。真相已入庫:corpus/global.jsonl(curated)
+# + corpus/raw/*.jsonl(provenance);產生工具見 tools/。下列皆可重建或為遠端副本:
+#   - 向量索引:本地 .qdrant/(見上方);Vectorize 為遠端、無本地檔。
+#   - canonical 本地快取:R2 為遠端真相,本地 ./data/canonical.jsonl 僅運行期副本。
+#   - 評測報告:python -m eval.run 重生。
+data/canonical.jsonl
+data/canonical/
 eval/report.json

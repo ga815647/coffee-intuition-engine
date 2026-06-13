@@ -7,7 +7,7 @@
 ## 一、輸出契約
 
 - 格式:**JSONL**,每行一筆,完全符合 `Record` schema 與列舉值。不要陣列、不要註解、不要 markdown。
-- 位置:**寫到自己的檔** `data/research/<scope>.jsonl`(scope 用小寫連字號,如 `ethiopia-washed`)。**絕不寫別人的檔、絕不共寫同一個檔**(防 race,見 §五)。
+- 位置:**寫到自己的檔** `corpus/raw/<scope>.jsonl`(scope 用小寫連字號,如 `ethiopia-washed`)。**絕不寫別人的檔、絕不共寫同一個檔**(防 race,見 §五)。orchestrator 之後跑 `python tools/qa_merge.py` 把 `corpus/raw/` 併成 curated `corpus/global.jsonl`。
 - `user_id` 一律 `"global"`;`timestamp` 留空(系統補)。
 
 ## 二、機制硬分區(填錯會污染整個分區)
@@ -43,7 +43,7 @@
 
 ## 六、並行與防 race(orchestrator + subagent 都讀)
 
-- **唯一輸出檔**:一個 scope 一個 subagent 一個 `data/research/<scope>.jsonl`。檔名互斥 = 無寫入衝突。
+- **唯一輸出檔**:一個 scope 一個 subagent 一個 `corpus/raw/<scope>.jsonl`。檔名互斥 = 無寫入衝突。
 - **subagent 內不要 `git commit`、不要 `pip install`、不要灌庫**(`cie.seed`/`rebuild`)。這些有共享狀態(git index、site-packages、向量庫),並行會互踩。全部留給 orchestrator 序列化做。
 - **不需要 git worktree**:因為各 subagent 只「新增」獨立檔、不改共享程式碼、不 commit。worktree 是為「並行改同一份程式碼 / 並行 commit」設計的;這裡用不到,加了反而增開銷與合併成本。
   - 例外:若某 subagent 需要改程式(不該發生於資料蒐集),才給它獨立 worktree + 分支。
