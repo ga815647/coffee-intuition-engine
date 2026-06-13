@@ -17,7 +17,8 @@ from cie.portability import read_jsonl
 from cie.schema import FLAVOR_AXES
 from cie.store import VectorStore
 
-from eval.run import DATASET_PATH, build_library_store, run_eval
+from eval.run import (CORPUS_PATH, DATASET_PATH, _holdout_signature,
+                      build_library_store, run_eval)
 
 
 def _cfg():
@@ -27,7 +28,21 @@ def _cfg():
 def test_harness_runs_and_counts_holdouts():
     r = run_eval(config=_cfg())
     assert r["n_holdout"] == 5
-    assert r["library_count"] >= 6  # seeds
+    # 召回庫來自 corpus/global.jsonl(扣除 holdout),不是 6 筆 seeds/anchors.jsonl。
+    corpus_n = len(read_jsonl(CORPUS_PATH))
+    assert corpus_n - 5 <= r["library_count"] <= corpus_n
+    assert r["library_count"] > 6  # 明確不是「只灌 6 筆 seeds」的舊行為
+
+
+def test_library_is_corpus_minus_holdout_by_content():
+    """召回庫源自策展語料且按內容扣除 holdout:把一筆 holdout 偽裝成語料的
+    完整副本(沿用其 bean+params 內容指紋),它必須不出現在召回庫裡。"""
+    holdouts = read_jsonl(DATASET_PATH)
+    holdout_ids = {h.id for h in holdouts}
+    store = build_library_store(holdout_ids, _cfg(), holdout_records=holdouts)
+    lib_sigs = {_holdout_signature(r) for r in store.iter_records()}
+    for h in holdouts:
+        assert _holdout_signature(h) not in lib_sigs  # 內容指紋層級確被扣除
 
 
 def test_leakage_checks_all_pass():

@@ -8,7 +8,8 @@
   (c) **方向 / 排序**:同機制配對裡,預測的高低排序是否與真值一致(pairwise accuracy)。
 
 防洩漏鐵則(§15 / design §12.6,務必):
-  1. 留出豆**絕不進召回庫**:此處用獨立記憶體 store,只灌 seeds;執行期驗證 id 與庫互斥,
+  1. 留出豆**絕不進召回庫**:此處用獨立記憶體 store,灌入策展語料 corpus/global.jsonl
+     並**按內容指紋扣除 holdout**(非 6 筆 seeds);執行期再驗證 id 與庫互斥(縱深防禦),
      且任何一筆證據都不得是留出豆。
   2. 嚴禁「事後感官子項」回推總分(R²≈0.82 陷阱):predict() 只吃 bean + params,
      結構上完全不碰任何真值風味軸——這是設計層保證,非靠自律。
@@ -31,12 +32,13 @@ from typing import Dict, List, Optional
 from cie.config import CONFIG, Config
 from cie.engine import Engine
 from cie.portability import read_jsonl
-from cie.schema import FLAVOR_AXES
-from cie.seed import seed
+from cie.schema import FLAVOR_AXES, Record
 from cie.store import StoreBackend, VectorStore
 
 DATASET_PATH = Path(__file__).resolve().parent / "dataset.jsonl"
 REPORT_PATH = Path(__file__).resolve().parent / "report.json"
+# 召回庫來源:策展語料(446 筆真相),不是 6 筆 seeds/anchors.jsonl。
+CORPUS_PATH = Path(__file__).resolve().parent.parent / "corpus" / "global.jsonl"
 NOMINAL_COVERAGE = 0.90  # weighted_estimate 用 ~90% 名目區間
 
 
@@ -52,17 +54,48 @@ def _rmse(errs: List[float]) -> float:
 
 # ────────────────────────────── 召回庫(防洩漏) ──────────────────────────────
 
-def build_library_store(holdout_ids: set, config: Config = CONFIG) -> VectorStore:
-    """建一個**獨立記憶體** store,只灌 A 級 seeds;確保留出豆不在其中。
+def _holdout_signature(r: Record) -> tuple:
+    """內容指紋:同一支豆 + 同機制 + 同泡法 + 核心參數 → 視為同一資料點。
 
+    用於從召回庫『扣除 holdout』。**不能靠 id**:`corpus/global.jsonl` 不帶 id
+    (schema 預設 uuid4,每次載入都不同),故按內容比對才可靠。浮點四捨五入避免噪音。
+    """
+    b, p = r.bean, r.params
+
+    def _rnd(x):
+        return None if x is None else round(float(x), 2)
+
+    return (
+        (b.origin or "").strip().lower(),
+        (b.variety or "").strip().lower(),
+        b.process.value,
+        _rnd(b.roast_agtron),
+        p.brew_mechanism.value,
+        (p.method or "").strip().lower(),
+        _rnd(p.water_temp_c), _rnd(p.brew_ratio), _rnd(p.grind_um),
+        _rnd(p.contact_time_s), _rnd(p.pressure_bar),
+    )
+
+
+def build_library_store(holdout_ids: set, config: Config = CONFIG,
+                        corpus_path: Path = CORPUS_PATH,
+                        holdout_records: Optional[List[Record]] = None) -> VectorStore:
+    """建一個**獨立記憶體** store,灌入策展語料 `corpus/global.jsonl`,**扣除 holdout**。
+
+    召回庫來源是 `corpus/global.jsonl`(446 筆策展真相),不是 6 筆 seeds/anchors.jsonl。
+    扣除 holdout 走**內容指紋**(id 由系統隨機生成不可靠);另保留 id 互斥檢查作縱深防禦。
     沿用設定的嵌入器(local / workers_ai 等),但強制記憶體模式以隔離正式索引,
-    且絕不寫入留出豆。執行期驗證 id 互斥(雙重保險,不只靠『沒插入』)。
+    且絕不寫入留出豆。
     """
     iso_cfg = replace(config, qdrant_url="", qdrant_api_key="", store_backend_override="memory")
     store = VectorStore(iso_cfg)
-    seed(store)  # 只灌 seeds;canonical 不掛(零副作用)
+    corpus = read_jsonl(corpus_path)
+    holdout_sigs = {_holdout_signature(h) for h in (holdout_records or [])}
+    kept = [r for r in corpus
+            if r.id not in holdout_ids and _holdout_signature(r) not in holdout_sigs]
+    store.upsert_many(kept)  # canonical 不掛(零副作用)
     leaked = holdout_ids & {r.id for r in store.iter_records()}
-    if leaked:  # pragma: no cover - 防禦:seeds 與 holdout id 命名互斥,不應發生
+    if leaked:  # pragma: no cover - 防禦:holdout id 與語料(uuid)命名互斥,不應發生
         raise RuntimeError(f"洩漏:留出豆出現在召回庫 → {leaked}")
     return store
 
@@ -76,7 +109,7 @@ def run_eval(dataset_path: Path = DATASET_PATH, store: Optional[StoreBackend] = 
     holdout_ids = {r.id for r in holdouts}
 
     if store is None:
-        store = build_library_store(holdout_ids, config)
+        store = build_library_store(holdout_ids, config, holdout_records=holdouts)
 
     # 防洩漏 1:留出豆不得在召回庫
     store_ids = {r.id for r in store.iter_records()} if hasattr(store, "iter_records") else set()

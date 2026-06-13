@@ -30,6 +30,7 @@ class CanonicalStore(Protocol):
     def append(self, record: Record) -> None: ...
     def extend(self, records: Iterable[Record]) -> int: ...
     def iter_records(self) -> Iterator[Record]: ...
+    def replace_all(self, records: Iterable[Record]) -> int: ...
 
 
 def _records_to_jsonl(records: Iterable[Record]) -> str:
@@ -78,6 +79,17 @@ class LocalJsonlCanonical:
                 n += 1
         return n
 
+    def replace_all(self, records: Iterable[Record]) -> int:
+        """清空後整份重寫(re-init / bootstrap --force / 災後重建)。回傳寫入筆數。
+
+        ⚠️ 會覆蓋累積的校準回饋。bootstrap 是一次性初始化;之後請只用 append/extend。
+        """
+        self._ensure_parent()
+        text = _records_to_jsonl(records)
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return text.count("\n")
+
     def iter_records(self) -> Iterator[Record]:
         if not self.path.exists():
             return
@@ -124,6 +136,15 @@ class R2Canonical:
             existing += "\n"
         self.client.r2_put_object(self.bucket, self.key, existing + new_text)
         return new_text.count("\n")
+
+    def replace_all(self, records: Iterable[Record]) -> int:
+        """整份覆寫 R2 物件(re-init / bootstrap --force)。回傳寫入筆數。
+
+        ⚠️ 會覆蓋累積的校準回饋。bootstrap 是一次性初始化;之後請只用 append/extend。
+        """
+        text = _records_to_jsonl(records)
+        self.client.r2_put_object(self.bucket, self.key, text)
+        return text.count("\n")
 
     def iter_records(self) -> Iterator[Record]:
         yield from _jsonl_to_records(self._read_text())
