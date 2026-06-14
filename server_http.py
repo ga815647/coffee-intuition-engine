@@ -37,6 +37,7 @@ from cie.config import CONFIG
 from cie.engine import Engine
 from cie.mcp_principal import (
     auth_is_configured, reset_principal, resolve_principal_from_config, set_principal,
+    validate_guest_token_config,
 )
 from cie.mcp_tools import register_tools
 from cie.rebuild import prime_serving_index
@@ -180,6 +181,11 @@ def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = 
             "owner 預設(可寫 global),網路呼叫者將繞過 member confinement 寫到 global(見 server_http "
             "安全註記、DESIGN §16.3)。請設 CIE_MCP_STATELESS=1。"
         )
+
+    # 設定面唯一性守衛(§16.3,fail-closed):guest token → self 命名空間須全域唯一、不撞
+    # primary token / owner 命名空間,否則多 guest 會靜默共用同一 self = 跨 guest 混入。
+    # 有破口即 GuestTokenConfigError(RuntimeError)拒啟動(對齊上面 stateless 守衛)。
+    validate_guest_token_config(config)
 
     eng = engine or Engine()
     # transport_security 顯式傳入(即使預設關閉):否則 FastMCP 因 host=127.0.0.1 自動開 DNS-rebinding

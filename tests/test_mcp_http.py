@@ -217,6 +217,30 @@ def test_build_app_refuses_stateful_mode():
                               engine=Engine(VectorStore()), auto_seed=False)
 
 
+# ───────── 設定面唯一性守衛:build_app 啟動 fail-closed(§16.3,N-guest self 不混入) ─────────
+
+def test_build_app_refuses_duplicate_guest_user_ids():
+    """兩個 guest token 對映同一 user_id → build_app fail-closed 拒啟動
+    (否則多 guest 靜默共用同一 self = 跨 guest 混入,§16.3 唯一性守衛)。"""
+    cfg = _cfg(mcp_guest_tokens=json.dumps({"tokA": "alice", "tokB": "alice"}))
+    with pytest.raises(RuntimeError, match="user_id"):
+        server_http.build_app(config=cfg, engine=Engine(VectorStore()), auto_seed=False)
+
+
+def test_build_app_refuses_guest_token_colliding_with_primary():
+    """guest token 撞 primary(CIE_MCP_AUTH_TOKEN)→ 拒啟動(否則該 guest 靜默落 owner 的 self)。"""
+    cfg = _cfg(mcp_guest_tokens=json.dumps({PRIMARY: "alice"}))
+    with pytest.raises(RuntimeError, match="primary"):
+        server_http.build_app(config=cfg, engine=Engine(VectorStore()), auto_seed=False)
+
+
+def test_build_app_accepts_unique_n_guests():
+    """≥3 個 user_id 互異的 guest → 正常啟動(守衛只擋破口,不擋合法多 guest)。"""
+    cfg = _cfg(mcp_guest_tokens=json.dumps({"t1": "g1", "t2": "g2", "t3": "g3"}))
+    app, _ = server_http.build_app(config=cfg, engine=Engine(VectorStore()), auto_seed=False)
+    assert app is not None
+
+
 # ────────────────────────────── stdio owner 門(唯一寫 global / 晉升,零回歸) ──────────────────────────────
 
 def test_stdio_entry_registers_all_tools_and_owner_principal():

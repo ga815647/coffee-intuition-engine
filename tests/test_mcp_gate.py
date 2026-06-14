@@ -7,12 +7,18 @@ grade≤B、拒 prediction、寫入流量上限生效;owner 晉升套 A-protocol
 """
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
+from cie.config import Config
 from cie.mcp_principal import (
     GLOBAL_USER_ID, LOCAL_PRINCIPAL, OWNER_SELF_USER_ID, RESERVED_NAMESPACES,
-    apply_write_trust, make_member_principal, make_reader_principal, register_write,
-    reset_write_counters, resolve_delete_scope, resolve_principal,
+    GuestTokenConfigError, apply_write_trust, current_principal, make_member_principal,
+    make_reader_principal, register_write, reset_principal, reset_write_counters,
+    resolve_delete_scope, resolve_principal, resolve_principal_from_config, set_principal,
+    validate_guest_token_config,
 )
 from cie.engine import Engine
 from cie.mcp_tools import (
@@ -481,3 +487,196 @@ def test_delete_counts_against_rate_limit(monkeypatch, engine):
                              origin="Kenya", roast_agtron=70, user_id="self")  # 用掉額度
     res = do_delete_calibration(engine, alice, record_id=out["id"])
     assert res["ok"] is False and res["gate"] == "rate_limit"
+
+
+# ───────── 設定面唯一性守衛:N-guest self 互不混入(§16.3,啟動 fail-closed) ─────────
+
+def _cfg(auth_token: str = "PRIMARY", guests=None):
+    """建一個只關心 MCP token 欄位的 Config(其餘走預設)。guests 可給 dict / list / str。"""
+    raw = guests if isinstance(guests, str) else (json.dumps(guests) if guests is not None else "")
+    return Config(mcp_auth_token=auth_token, mcp_guest_tokens=raw)
+
+
+def test_guard_accepts_unique_n_guests():
+    """≥3 個 user_id 互異的 guest → 通過,回乾淨對映(不 raise)。"""
+    tokens = validate_guest_token_config(_cfg(guests={"t1": "g1", "t2": "g2", "t3": "g3"}))
+    assert tokens == {"t1": "g1", "t2": "g2", "t3": "g3"}
+
+
+def test_guard_rejects_duplicate_user_id():
+    """主破口:兩個 guest token 對映同一 user_id → fail-closed 拒絕(否則共用同一 self)。"""
+    with pytest.raises(GuestTokenConfigError, match="user_id"):
+        validate_guest_token_config(_cfg(guests={"t1": "alice", "t2": "alice"}))
+
+
+def test_guard_rejects_duplicate_among_three_guests():
+    """N>2:g1=alice、g2=bob、g3=bob(第三個撞第二個)→ 拒。"""
+    with pytest.raises(GuestTokenConfigError, match="bob"):
+        validate_guest_token_config(_cfg(guests={"t1": "alice", "t2": "bob", "t3": "bob"}))
+
+
+def test_guard_is_runtime_error_subclass():
+    """GuestTokenConfigError 為 RuntimeError 子類(沿用啟動 fail-closed 慣例,可用 RuntimeError 接)。"""
+    assert issubclass(GuestTokenConfigError, RuntimeError)
+    with pytest.raises(RuntimeError):
+        validate_guest_token_config(_cfg(guests={"a": "x", "b": "x"}))
+
+
+def test_guard_rejects_guest_token_colliding_with_primary():
+    """guest token 字串撞 primary(CIE_MCP_AUTH_TOKEN)→ 拒(否則被 primary 規則搶先 → owner 的 self)。"""
+    with pytest.raises(GuestTokenConfigError, match="primary"):
+        validate_guest_token_config(_cfg(auth_token="SHARED", guests={"SHARED": "alice"}))
+
+
+def test_guard_rejects_reader_token_colliding_with_primary():
+    """連 reader token 撞 primary 也拒:否則純讀 token 靜默升格為可寫 owner-self member。"""
+    with pytest.raises(GuestTokenConfigError, match="primary"):
+        validate_guest_token_config(_cfg(auth_token="SHARED", guests={"SHARED": ""}))
+
+
+def test_guard_rejects_guest_claiming_owner_self_namespace():
+    """guest 認領 owner 的個人命名空間(auth_user_id,預設 'self')→ 拒。
+    'self' 本即保留字(_parse 會 skip),故顯式傳一個非保留的 auth_user_id 驗這道補強。"""
+    with pytest.raises(GuestTokenConfigError, match="owner"):
+        validate_guest_token_config(_cfg(guests={"t1": "ownerns"}), auth_user_id="ownerns")
+
+
+def test_guard_reserved_namespaces_skipped_with_n_guests():
+    """保留字 global / self 沿用既有 reject(skip);N guest 下被踢除、合法者保留、不誤判重複。"""
+    tokens = validate_guest_token_config(
+        _cfg(guests={"t1": "global", "t2": "self", "t3": "carol", "t4": "dave"}))
+    assert tokens == {"t3": "carol", "t4": "dave"}     # 兩個保留字筆被剔除
+
+
+def test_guard_two_guests_claiming_reserved_not_treated_as_dup():
+    """兩 guest 都認領保留字 → 都被 skip(各自 401),不算『重複 user_id』而誤 raise。"""
+    tokens = validate_guest_token_config(_cfg(guests={"t1": "global", "t2": "global"}))
+    assert tokens == {}                                # 皆 skip,無破口
+
+
+def test_guard_readers_do_not_collide_on_uniqueness():
+    """多個 reader(無命名空間)不參與 user_id 唯一性:可並存,不誤判重複。"""
+    tokens = validate_guest_token_config(_cfg(guests={"r1": "", "r2": "", "g1": "alice"}))
+    assert tokens == {"r1": None, "r2": None, "g1": "alice"}
+
+
+def test_guard_user_id_is_explicit_config_value_not_derived():
+    """user_id 取設定明確值,不由 token 衍生:兩 token 共享長前綴但 user_id 互異 → 各自解析為
+    明確命名空間(證明非雜湊截斷 / 顯示名衍生,否則會碰撞成同一 self)。"""
+    long_a = "tok_shared_prefix_AAAAAAAAAAAAAAAAAAAA_a"
+    long_b = "tok_shared_prefix_AAAAAAAAAAAAAAAAAAAA_b"
+    tokens = validate_guest_token_config(_cfg(guests={long_a: "alice", long_b: "bob"}))
+    assert tokens == {long_a: "alice", long_b: "bob"}
+    members = {"alice": _parse_guest(json.dumps({long_a: "alice"})),
+               "bob": _parse_guest(json.dumps({long_b: "bob"}))}
+    assert resolve_principal(long_a, member_tokens=members["alice"]).write_user_id == "alice"
+    assert resolve_principal(long_b, member_tokens=members["bob"]).write_user_id == "bob"
+
+
+def test_guard_empty_config_is_noop():
+    """無 guest token → 空對映,不 raise(守衛對空設定無副作用)。"""
+    assert validate_guest_token_config(_cfg(guests=None)) == {}
+
+
+def test_no_shared_fallback_unmatched_token_is_none():
+    """無共用 fallback:N guest 設定下,任何不命中的 token 一律 None(401),絕不退某共用預設 ns。"""
+    cfg = _cfg(auth_token="PRIMARY", guests={"t1": "g1", "t2": "g2", "t3": "g3"})
+    assert resolve_principal_from_config("does-not-match-anything", cfg) is None
+    assert resolve_principal_from_config("", cfg) is None
+    assert resolve_principal_from_config(None, cfg) is None
+    # 命中者各自解析到自己的命名空間(無人退回共用預設)。
+    assert resolve_principal_from_config("t2", cfg).write_user_id == "g2"
+
+
+# ───────── N-guest pairwise 隔離(≥3 guest + owner,本輪把 2-member 硬化到 N) ─────────
+
+GUEST_NS = ("g1", "g2", "g3")
+
+
+def _guest(ns):
+    return make_member_principal(f"member:{ns}", ns)
+
+
+def _write_self_probe(engine, principal, grind):
+    """同一查詢豆況、僅 grind 微異 → 若讀隔離洩漏,該筆必出現在他人證據裡。"""
+    out = do_log_calibration(engine, principal, brew_mechanism="percolation", grade="C",
+                             origin="Ethiopia", process="washed", roast_agtron=74,
+                             method="V60", grind_um=grind, acidity=7.4, user_id="self")
+    assert out["ok"], out
+    return out["id"]
+
+
+def _evidence_ids(engine, principal):
+    res = do_query(engine, principal, brew_mechanism="percolation", mode="recommend",
+                   origin="Ethiopia", process="washed", roast_agtron=74)
+    return {e["id"] for e in res.get("evidence", [])}
+
+
+def test_n_guest_self_read_pairwise_isolation(engine):
+    """≥3 guest:每個 guest 讀只見 global + 自己的 self,讀不到另外任一 guest 的 self(pairwise)。"""
+    ids = {}
+    for i, ns in enumerate(GUEST_NS):
+        ids[ns] = _write_self_probe(engine, _guest(ns), 651 + i)
+        assert _uid_of(engine, ids[ns]) == ns
+    for ns in GUEST_NS:
+        sees = _evidence_ids(engine, _guest(ns))
+        assert ids[ns] in sees, f"{ns} 應讀得到自己的 self 校準"
+        for other in GUEST_NS:
+            if other != ns:
+                assert ids[other] not in sees, f"跨 guest 洩漏:{ns} 讀到 {other} 的 self!"
+    owner_sees = _evidence_ids(engine, LOCAL_PRINCIPAL)   # owner 讀不過濾:全可見(供晉升審查)
+    assert all(ids[ns] in owner_sees for ns in GUEST_NS)
+
+
+def test_n_guest_write_to_other_ns_is_confined(engine):
+    """guest 指定他人 ns / global 寫 → 一律 confine 回自有;他人 self 筆數不增(pairwise)。"""
+    base = {ns: _write_self_probe(engine, _guest(ns), 660 + i) for i, ns in enumerate(GUEST_NS)}
+    assert len(base) == 3
+
+    def count_ns(ns):
+        return sum(1 for r in engine.store.iter_records() if r.user_id == ns)
+
+    before = {ns: count_ns(ns) for ns in GUEST_NS}
+    before_global = count_ns(GLOBAL_USER_ID)
+    # g1 嘗試寫到 g2 / g3 / global → 全部落 g1 自有 ns。
+    for target in ("g2", "g3", GLOBAL_USER_ID):
+        out = do_log_calibration(engine, _guest("g1"), brew_mechanism="percolation", grade="C",
+                                 origin="Ethiopia", process="washed", roast_agtron=74,
+                                 method="V60", grind_um=700, user_id=target)
+        assert out["ok"] and _uid_of(engine, out["id"]) == "g1"
+    assert count_ns("g2") == before["g2"]                # g2 未因 g1 的寫入增加
+    assert count_ns("g3") == before["g3"]                # g3 亦然
+    assert count_ns(GLOBAL_USER_ID) == before_global     # global 未被污染
+
+
+def test_n_guest_delete_others_blocked_pairwise(engine):
+    """guest 拿他人 record id 刪 → 落空(底層 user_id 不符);他人 self 不變;自刪成功。"""
+    ids = {ns: _write_self_probe(engine, _guest(ns), 670 + i) for i, ns in enumerate(GUEST_NS)}
+    for victim in ("g2", "g3"):
+        res = do_delete_calibration(engine, _guest("g1"), record_id=ids[victim])
+        assert res["ok"] is False and res["deleted_memory"] == 0
+        assert _rec_of(engine, ids[victim]) is not None, f"g1 竟刪掉了 {victim} 的 self!"
+    assert do_delete_calibration(engine, _guest("g1"), record_id=ids["g1"])["ok"] is True
+    assert _rec_of(engine, ids["g1"]) is None            # g1 刪自己 → 成功
+
+
+def test_n_guest_principal_no_bleed_under_concurrency():
+    """重申 HIGH principal-bleed 守衛在 N>2 仍成立:N 個並發 task 各設自己的 principal,
+    互不洩漏(contextvar 每 asyncio Task 獨立 copy;stateless streamable-http 即靠此隔離)。"""
+    principals = [make_member_principal(f"member:g{i}", f"g{i}") for i in range(5)]
+
+    async def one(p):
+        tok = set_principal(p)
+        try:
+            await asyncio.sleep(0)                        # 讓出排程,逼出潛在跨 task 洩漏
+            assert current_principal().write_user_id == p.write_user_id
+            await asyncio.sleep(0)
+            assert current_principal() is p               # 仍是自己的,未被別的 task 蓋掉
+            return current_principal().write_user_id
+        finally:
+            reset_principal(tok)
+
+    async def run():
+        return await asyncio.gather(*(asyncio.create_task(one(p)) for p in principals))
+
+    assert asyncio.run(run()) == [f"g{i}" for i in range(5)]

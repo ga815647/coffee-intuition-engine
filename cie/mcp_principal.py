@@ -14,6 +14,12 @@ token 解析:`CIE_MCP_AUTH_TOKEN` = 你個人 member token(日常 claude.ai 用,
 陣列(無命名空間 → reader)。值為空 / null → reader;值為保留字(`global` / `self`)→ 拒收
 (fail-closed)。身分解析以**常數時間**比對 token(`hmac.compare_digest`),未設密鑰一律 fail-closed。
 
+N-guest 設定面唯一性守衛(§16.3,啟動 fail-closed):**任兩個 guest token 的 user_id 必須全域
+唯一**——兩 guest 對映同一 user_id 就是同一個 self、結構上無從分隔(= 跨 guest 混入)。
+`validate_guest_token_config` 於啟動硬檢查(重複 user_id / 撞 primary token / 認領 owner 命名空間
+→ 拒啟動),把『member A 讀不到 / 寫不到 / 刪不到 B 的 self』從 2 member 硬化到 N guest。
+無共用 fallback:任何無法乾淨解析的 token 一律回 `None`(401),絕不退某個共用預設命名空間。
+
 寫入隔離是這條公開可寫端點的命門,靠三道**結構性**保證(非靠客戶端自律):
   1. **命名空間 confinement**:member 寫入一律 `model_copy` 改寫 `user_id = principal.write_user_id`,
      呼叫端指定什麼都蓋掉 → 寫不到 global / 他人 ns(`apply_write_trust`)。
@@ -121,6 +127,11 @@ def _parse_member_tokens(raw: str) -> Dict[str, Optional[str]]:
       - 物件 `{"tok_a":"alice","tok_b":"bob"}`:值 = member 寫入命名空間(`user_id`)。
         值為空 / null → reader;值為保留字(global / self)→ **拒收該筆**(防訪客認領 owner 層)。
       - 陣列 `["tok_a","tok_b"]`:無命名空間 → 一律 reader。
+
+    **寬鬆**(per-request 熱路徑安全,永不 raise):此處不做 user_id 唯一性 / 撞 primary 檢查——
+    那是啟動時 `validate_guest_token_config` 的 fail-closed 守衛(§16.3);啟動已驗過,熱路徑見到的
+    設定即無破口。注意 user_id 一律取**設定裡的明確值**(`str(v).strip()`),絕不由 token 雜湊截斷 /
+    顯示名衍生(可碰撞 → 跨 guest 混入)。
     """
     if not raw:
         return {}
@@ -195,6 +206,72 @@ def resolve_principal_from_config(token: Optional[str], config=CONFIG) -> Option
 def auth_is_configured(config=CONFIG) -> bool:
     """是否設了任一可用密鑰;沒有則 server fail-closed(全部 401)。"""
     return bool(config.mcp_auth_token or _parse_member_tokens(config.mcp_guest_tokens))
+
+
+# ─────────────── 設定面唯一性守衛(§16.3:N-guest self 互不混入,啟動 fail-closed) ───────────────
+
+class GuestTokenConfigError(RuntimeError):
+    """guest token 設定有『會讓多 guest 靜默共用同一 self』的破口 → 拒絕啟動(fail-closed)。
+
+    觸發(任一即拒,§16.3 唯一性守衛):
+      1. 兩個 guest token 對映到**同一 user_id**(會擠進同一 self 命名空間 = 跨 guest 混入);
+      2. guest token 與 **primary**(`CIE_MCP_AUTH_TOKEN`)token 字串相同(被 primary 規則搶先
+         解析 → 該 guest 靜默落 owner 的 self 層,或 reader token 靜默升格為可寫 member);
+      3. guest 認領 **primary 的命名空間**(owner 的 self,`auth_user_id`)。
+
+    繼承 `RuntimeError`:沿用既有啟動 fail-closed 慣例(對齊 `server_http` 的 stateless 守衛)。
+    保留字 `{global, self}` 的整體 reject 仍由 `_parse_member_tokens` 負責(skip + warn,沿用既有);
+    無共用 fallback:任何無法乾淨解析的 token 由 `resolve_principal` 回 `None`(401),絕不退共用預設。
+    """
+
+
+def validate_guest_token_config(
+    config=CONFIG,
+    *,
+    auth_user_id: str = OWNER_SELF_USER_ID,
+) -> Dict[str, Optional[str]]:
+    """啟動硬檢查(§16.3 設定面唯一性守衛,fail-closed):確認 guest token → self 命名空間
+    『全域唯一、不撞 primary token / 命名空間』。有破口即 raise `GuestTokenConfigError` 拒啟動。
+
+    這是把核心隔離(member A 讀不到 / 寫不到 / 刪不到 B 的 self)從『2 member』硬化到『N guest』
+    的設定面補強:結構性隔離靠 user_id 區分命名空間,故**兩個 guest 絕不可對映到同一 user_id**
+    (否則它們就是同一個 self,結構上無從分隔)。`server_http.build_app` 啟動時呼叫。
+
+    回傳已驗證乾淨的 `{token: user_id|None}`(`None`=reader);reader(無命名空間)**不參與
+    user_id 唯一性**(本就無 self 層),但仍受 primary-token 撞檢。寬鬆 `_parse_member_tokens`
+    (per-request 熱路徑)不變——啟動時已驗過,熱路徑不再 raise。
+
+    守衛:
+      1. **user_id 全域唯一**:任兩個 guest token 對映同一 user_id → 拒(『靜默混入』主破口)。
+      2. **不撞 primary token**:guest token == `CIE_MCP_AUTH_TOKEN` → 拒(否則 `resolve_principal`
+         以 primary 規則搶先命中、該 guest 靜默落 owner 的 self;含 reader token 撞 → 靜默變可寫 member)。
+      3. **不認領 primary 命名空間**:guest user_id == owner 的 self(`auth_user_id`)→ 拒
+         (`{global, self}` 已由 `_parse_member_tokens` skip;此為 `auth_user_id` 可調時的補強)。
+    """
+    auth_token = config.mcp_auth_token
+    tokens = _parse_member_tokens(config.mcp_guest_tokens)
+
+    seen_user_ids: Dict[str, None] = {}
+    for tok, ns in tokens.items():
+        # (2) guest token 不得與 primary token 相同(常數時間比對;含 reader token)。
+        if auth_token and _safe_eq(tok, auth_token):
+            raise GuestTokenConfigError(
+                "某 guest token 與 CIE_MCP_AUTH_TOKEN(primary)相同:該 token 會被 primary 規則"
+                "搶先解析、靜默落 owner 的 self 層(reader token 撞則靜默升格為可寫 member)。"
+                "請為每個 guest 用獨立 token。")
+        if ns is None:
+            continue  # reader:無 self 命名空間,不參與 user_id 唯一性
+        # (3) guest 不得認領 owner 的個人命名空間。
+        if ns == auth_user_id:
+            raise GuestTokenConfigError(
+                f"guest 不得認領 owner 的個人命名空間 {auth_user_id!r}(會與 owner 的 self 混入)。")
+        # (1) user_id 全域唯一:重複即拒(否則多 guest 共用同一 self = 跨 guest 混入)。
+        if ns in seen_user_ids:
+            raise GuestTokenConfigError(
+                f"兩個 guest token 對映到同一 user_id {ns!r}:多 guest 會靜默共用同一 self 命名空間"
+                f"(跨 guest 混入)。每個 guest 的 user_id 必須全域唯一。")
+        seen_user_ids[ns] = None
+    return tokens
 
 
 # ────────────────────────────── 寫入閘(§16.2:寫入分層,global 不可從網路寫) ──────────────────────────────

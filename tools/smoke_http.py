@@ -14,9 +14,12 @@
      b. member 嘗試寫 global → 被強制改寫回自有 ns(trust_notes),**global 未被污染**。
      c. **讀隔離**:純讀 token(reader,只讀 global)與另一個 member 都**讀不到**該筆 self,
         只有寫入者自己讀得到。
+  5. **N-guest pairwise self 隔離(≥3 命名空間)**:self / alice / bob 三個 member 各寫一筆
+     self 探針 → 任一 member 只讀得到自己那筆,讀不到另外兩個的 self(pairwise);reader 三筆全讀不到。
+     設定面唯一性守衛(每個 guest user_id 全域唯一)由 build_app 啟動硬檢查保障。
 
 跑:  python tools/smoke_http.py
-不需外網、不需金鑰外掛:本腳本自帶三層 token 設定到記憶體 config。
+不需外網、不需金鑰外掛:本腳本自帶 N 層 token 設定到記憶體 config。
 """
 from __future__ import annotations
 
@@ -51,11 +54,16 @@ import server_http
 
 PRIMARY_TOKEN = "smoke-primary-member"   # CIE_MCP_AUTH_TOKEN:你個人 member(寫自己的 self)
 ALICE_TOKEN = "smoke-alice-member"       # 訪客 member,寫 "alice" 命名空間
+BOB_TOKEN = "smoke-bob-member"           # 第二訪客 member,寫 "bob" 命名空間(N-guest pairwise 用)
 READER_TOKEN = "smoke-reader"            # 純讀 token(無命名空間 → reader,只讀 global)
 
 # [4] 用的辨識度高的豆況(冷啟動種子幾乎不會撞,讓召回乾淨可判定)。
 DISTINCT_BEAN = {"origin": "Zzz Smoketest Estate", "process": "anaerobic", "roast_agtron": 80}
 QUERY_ARGS = {"brew_mechanism": "percolation", "mode": "recommend", **DISTINCT_BEAN}
+
+# [5] N-guest pairwise 用另一組辨識度高的豆況(與 [4] 區隔,避免互相干擾召回)。
+PAIR_BEAN = {"origin": "Yyy Pairwise Estate", "process": "honey", "roast_agtron": 72}
+PAIR_QUERY = {"brew_mechanism": "percolation", "mode": "recommend", **PAIR_BEAN}
 
 
 def _free_port() -> int:
@@ -68,7 +76,8 @@ def _build_server(port: int) -> uvicorn.Server:
     cfg = Config(
         mcp_auth_token=PRIMARY_TOKEN,
         # 物件形式:值=命名空間 → member;值為空字串 → reader(只讀 global)。
-        mcp_guest_tokens=json.dumps({ALICE_TOKEN: "alice", READER_TOKEN: ""}),
+        # alice / bob 兩個 user_id 互異(設定面唯一性守衛要求),供 N-guest pairwise 驗證。
+        mcp_guest_tokens=json.dumps({ALICE_TOKEN: "alice", BOB_TOKEN: "bob", READER_TOKEN: ""}),
         mcp_stateless=True,
     )
     app, _ = server_http.build_app(config=cfg, engine=Engine(VectorStore()), auto_seed=True)
@@ -196,8 +205,33 @@ async def _run_client(base: str) -> None:
     print(f"{ok} [4c] 讀隔離生效:alice 自己看得到({len(alice_sees)} 筆),"
           f"reader 看不到({len(reader_sees)} 筆,global 未被污染)、另一 member 看不到。")
 
+    # ── 5. N-guest pairwise self 隔離(≥3 self 命名空間:self / alice / bob + reader) ──
+    # 三個 member 各寫一筆同豆況、僅 grind 微異的 self 探針;證明任一 member 只讀得到自己那筆,
+    # 讀不到另外兩個的 self(pairwise),reader 三筆全讀不到。任兩 guest 的 self 永不相碰。
+    members = {"self": PRIMARY_TOKEN, "alice": ALICE_TOKEN, "bob": BOB_TOKEN}
+    probe_ids: dict[str, str] = {}
+    for i, (ns, tok) in enumerate(members.items()):
+        w = await _call(mcp_url, tok, "log_calibration", {
+            "brew_mechanism": "percolation", "grade": "C", "method": "V60",
+            "grind_um": 610 + i, "acidity": 8.0, **PAIR_BEAN,
+        })
+        assert w.get("ok"), f"{ns} 寫自有 self 探針失敗:{w}"
+        probe_ids[ns] = w["id"]
+    for ns, tok in members.items():
+        sees = await _evidence_ids(mcp_url, tok, PAIR_QUERY)
+        assert probe_ids[ns] in sees, f"{ns} 應讀得到自己的 self 探針"
+        for other in members:
+            if other != ns:
+                assert probe_ids[other] not in sees, (
+                    f"跨 guest 洩漏!{ns} 讀到 {other} 的 self 探針(pairwise 隔離破)")
+    reader_pair = await _evidence_ids(mcp_url, READER_TOKEN, PAIR_QUERY)
+    assert all(pid not in reader_pair for pid in probe_ids.values()), \
+        "讀隔離破!reader 讀到了某 member 的 self 探針"
+    print(f"{ok} [5] N-guest pairwise self 隔離:self / alice / bob 三命名空間互不可見"
+          f"(各自只見自己 1 筆),reader 三筆全讀不到。")
+
     print("\n✅ 全部 smoke 檢查通過。網路面(HTTP)= member 受限寫:認證 + 機制硬分區 OK、"
-          "\n   member 寫入強制落自有 ns(global 永不被網路污染)、self 讀取互相隔離。"
+          "\n   member 寫入強制落自有 ns(global 永不被網路污染)、self 讀取互相隔離(N-guest pairwise)。"
           "\n   寫 global / 晉升只在本機 stdio owner 門。")
 
 
