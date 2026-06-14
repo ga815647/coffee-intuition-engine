@@ -40,6 +40,7 @@ def record_to_payload(r: Record) -> Dict[str, Any]:
         "roast_band": r.bean.roast_band(),
         "roast_agtron": r.bean.roast_agtron,
         "origin": r.bean.origin,
+        "variety": r.bean.variety,  # §3.2 bean_match 同豆閘需要(origin+variety+process)
         # 參數數值(供物理距離 / 收縮)
         "water_temp_c": r.params.water_temp_c,
         "brew_ratio": r.params.brew_ratio,

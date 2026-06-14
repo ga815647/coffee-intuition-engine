@@ -9,7 +9,9 @@ from typing import Dict, List, Optional
 
 from . import physics
 from .canonical import CanonicalStore, maybe_get_canonical
-from .retrieval import RetrievalResult, assess, weighted_estimate
+from .retrieval import (
+    Estimate, RetrievalResult, assess, bean_match, social_tendency, weighted_estimate,
+)
 from .schema import (
     FLAVOR_AXES, BeanRoast, BrewMechanism, BrewParams, FlavorProfile, Grade, Record,
 )
@@ -26,19 +28,34 @@ class Engine:
         # Qdrant 的重複寫與測試副作用。可由呼叫端顯式注入(測試 / R2)。
         self.canonical = canonical if canonical is not None else maybe_get_canonical(self.store)
 
-    # ── 召回 ──
+    # ── 召回(分級召回:防大量低級料把少數同豆 A/B 擠出 top-k;§3.1) ──
     def _recall(self, bean: BeanRoast, mechanism: BrewMechanism, flavor: FlavorProfile,
                 top_k: int = 20, user_ids: Optional[List[str]] = None) -> List[dict]:
         query_text = Record(
             bean=bean, params=BrewParams(brew_mechanism=mechanism), flavor=flavor
         ).build_embedding_text()
-        return self.store.search(
-            query_text=query_text, mechanism=mechanism, top_k=top_k,
+        # 先召回較大集合,再對 A/B 與其餘各取 top_k 合併,確保少數同豆 A/B 不被 C 量壓掉。
+        pool = self.store.search(
+            query_text=query_text, mechanism=mechanism, top_k=max(top_k * 3, 60),
             process=bean.process.value if bean.process else None,
             roast_band=bean.roast_band() if bean.roast_band() != "unknown" else None,
             exclude_predictions=True,
             user_ids=user_ids,  # 多租戶讀範圍(§16.3);None=不過濾(本地/owner 全可見)
         )
+        ab = [h for h in pool if (h.get("payload") or {}).get("grade") in ("A", "B")]
+        rest = [h for h in pool if (h.get("payload") or {}).get("grade") not in ("A", "B")]
+        # 只「救援」少數 A/B 不被大量 C 擠出 top_k——保留各取 top_k 的聯集,但**仍依 pool 的
+        # 原生分數序回傳**(不把 A/B 在同分時硬排到 C 前面;否則 owner 讀證據時 C 自有 self 會
+        # 被同分 B 擠掉,破多租戶讀可見性)。pool 已由 store.search 依分數排序。
+        keep = {h["id"] for h in ab[:top_k]} | {h["id"] for h in rest[:top_k]}
+        return [h for h in pool if h["id"] in keep]
+
+    @staticmethod
+    def _same_bean(bean: BeanRoast, hits: List[dict]) -> List[dict]:
+        """同豆鄰居(§3.2):origin 主產地 token + variety + process 三欄皆符。"""
+        proc = bean.process.value if bean.process else ""
+        return [h for h in hits
+                if bean_match(bean.origin, bean.variety, proc, h.get("payload"))[0]]
 
     # ── 推薦起手參數 ──
     def recommend(self, bean: BeanRoast, mechanism: BrewMechanism,
@@ -59,7 +76,8 @@ class Engine:
         return {
             "mode": "recommend",
             "mechanism": mechanism.value,
-            "suggested_params": params,
+            "suggested_params": params,  # 大方向:全鄰居(跨產地/品種可,物理可遷移;§3.2)
+            "social_tendency": social_tendency(hits, bean),  # 風味參考;不影響 suggested_params
             "physics_note": gc["note"],
             "confidence_flag": flag,
             "a_weight_ratio": ratio,
@@ -72,21 +90,35 @@ class Engine:
                 user_ids: Optional[List[str]] = None) -> dict:
         hits = self._recall(bean, params.brew_mechanism, FlavorProfile(), user_ids=user_ids)
         ratio, flag, warnings = assess(hits)
+        # 風味「這隻豆的特色」只信同豆(§3.2):predicted_flavor 只吃 bean_match=True 鄰居;
+        # 跨豆(含 A/B)與 C 的風味降級進 social_tendency,永不寫進 predicted_flavor 特色。
+        same_bean = self._same_bean(bean, hits)
         flavor: Dict[str, dict] = {}
-        for axis in FLAVOR_AXES:
-            est = weighted_estimate(hits, f"flavor_{axis}", prior_value=None)
-            if est.value is not None:
-                flavor[axis] = est.__dict__
+        flavor_warnings: List[str] = []
+        if same_bean:
+            for axis in FLAVOR_AXES:
+                est = weighted_estimate(same_bean, f"flavor_{axis}", prior_value=None)
+                if est.value is not None:
+                    flavor[axis] = est.__dict__
+        else:
+            # 無同豆鄰居 → predicted_flavor 走物理粗略(coarse、無區間);特色交給 social_tendency。
+            for axis, val in physics.coarse_flavor_axes(bean, params).items():
+                flavor[axis] = Estimate(val, None, None, 0.0, "prior").__dict__
+            flavor_warnings.append(
+                "風味特色無同豆校準:predicted_flavor 為物理粗略(generic 大方向、無精確區間),"
+                "特色見 social_tendency(跨豆/社群參考、非本豆實測)。"
+            )
         extraction = physics.flavor_prior_from_extraction(params.tds_pct, params.ey_pct)
         return {
             "mode": "predict",
             "mechanism": params.brew_mechanism.value,
             "predicted_flavor": flavor,
+            "social_tendency": social_tendency(hits, bean),  # additive 跨豆/社群風味參考(§16.4)
             "extraction_prior": extraction,
             "confidence_flag": flag,
             "a_weight_ratio": ratio,
             "evidence": self._evidence(hits),
-            "warnings": warnings + self._sparse_warning(hits)
+            "warnings": warnings + flavor_warnings + self._sparse_warning(hits)
                        + ["定位:方向/排序可信度 > 絕對數值(R² 天花板 ~0.5)。"],
         }
 

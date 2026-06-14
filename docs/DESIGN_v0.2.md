@@ -796,13 +796,31 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 - **stateless 為 load-bearing(`CIE_MCP_STATELESS=1`,啟動硬檢查)**:per-request member / reader principal 走 `contextvar`,須在 **stateless** streamable-http 下才保證被工具看到。**有狀態**模式會把工具派發跑進「該 session 首個請求建立的長壽任務」,後續請求中介層設的 principal 看不到 → 工具退回 contextvar 預設 = `LOCAL_PRINCIPAL`(owner、`can_write=True`、不過濾讀)。**這會讓網路呼叫者取得 owner 權限、繞過 member confinement 寫到 global、讀到所有 self** → 直接瓦解三層隔離。故 `server_http.build_app` 對 `mcp_stateless=False` **fail-closed 拒啟動**(`RuntimeError`)。多 guest 並發下,principal 不跨 guest 洩漏即靠此(contextvar 每 asyncio Task 獨立 copy;見 `test_n_guest_principal_no_bleed_under_concurrency`)。
 - 測試:`tests/test_mcp_gate.py`(member A 讀不到 member B 的 self、reader 只讀 global、機制硬分區、`store.search(user_ids=)` 加性過濾;**N-guest:≥3 guest pairwise self 讀/寫/刪隔離、唯一性守衛拒重複 user_id / 撞 primary / 認領 owner ns、保留字 N-guest skip、無共用 fallback、user_id 非衍生、並發 principal 不洩漏**);`tests/test_mcp_http.py`(`build_app` 對 stateless=False 拒啟動、**對重複 user_id / 撞 primary 的 guest 設定拒啟動、合法 N guest 正常啟動**、stdio owner 門掛全部工具且預設 owner);`tools/smoke_http.py`([4c] reader / 另一 member 都讀不到某 member 的 self;**[5] self / alice / bob 三命名空間 pairwise 互不可見、reader 全讀不到**)。
 
-### 16.4 C 級的「社群傾向」旁註(承 §3,補充而非鬆綁)
+### 16.4 召回範圍依特異度分流 + 社群傾向旁註(承 §3;✅ 已落地)
 
-A/B 鄰居不足時,C 可提供參考,但**換欄位、換名字、不混進因果**:
+承 §3 兩種「方向」之分(物理因果方向 vs 社群發表傾向),本節定下**召回範圍**的硬規則並記其實作。
 
-- 區分兩種「方向」:**物理因果方向**(params→flavor,客觀)C 永不定義;**社群發表傾向**(大家貼出來的中央趨勢)C 可答,但標明是「社群發表傾向(參考、非真值)」——會貼網路本身就有發表偏差。
-- 退回順序:**物理先驗(可信方向)優先 → 再附 C 級社群傾向當第二訊號**,獨立標籤、不融入客觀估計、拉寬區間 + 標低信心。
-- 實作:輸出可加一個獨立欄(如 `social_tendency`),與 `predicted_flavor` / `suggested_params` 分開呈現。
+**核心決策:召回範圍隨問題特異度而變。**
+
+- **風味「這支豆的特色」(`predict.predicted_flavor`)只借同豆鄰居。** 「耶加雪菲藝妓喝起來怎樣」只能由同一支豆(同產地 + 同品種 + 同處理法)的校準回答;**跨豆的風味(含 A/B)永不寫進 `predicted_flavor`**。理由:風味特色是豆的身分屬性,別支豆的具體風味套到這支豆是幻覺。
+- **沖煮「大方向」(`recommend.suggested_params`、`diagnose`)可借廣鄰居。** 起手研磨/溫度/比例、過酸苦的調整方向是**物理可遷移**的(跨產地/品種仍有效),故 recommend/diagnose 不限同豆。
+- **跨豆 / 社群的風味只降級進 `social_tendency`**(additive 旁註),與客觀估計**並列、不混入**:`reputed=true`、`confidence="low"`、不流入 `predicted_flavor`、**不呼叫 `weighted_estimate`**。
+
+**同豆閘 `bean_match(q_origin, q_variety, q_process, payload) -> (bool, specificity)`(`cie/retrieval.py`):**
+
+- **origin = 身分錨點(非對稱)**:雙方都要有可解析的主產地 token(`origin_main_token`:小寫去通用詞後第一個有意義 token,`Ethiopia Yirgacheffe`→`ethiopia`)且**相等**,否則 `False`。**刻意偏離「未指定即放行」的字面對稱**:語料中有 61 筆 **blank-origin** 的泛用沖煮知識料,若對 origin 也套對稱寬鬆,這些料會變成**所有豆的萬用風味捐贈者**(任一同處理法查詢都「同豆」)→ 破核心決策。故 blank-origin 料只能進大方向(全鄰居),永不定義某豆的風味特色。
+- **variety / process = 子屬性(對稱寬鬆)**:沿用「任一方未指定 → 該欄放行,`specificity` 降 `low`」,讓只給部分資訊的查詢/料仍能在**同產地內**對上;雙方皆具體且符 → `high`;雙方皆具體但不同 → `False`。
+- 單元驗收(`tests/test_neighbor_scope.py`):耶加藝妓 vs 巴拿馬藝妓(差 origin)→ `False`;vs 耶加 Heirloom(差 variety)→ `False`;blank-origin → `False`;查詢未填 variety vs 指定料 → `True/low`。
+
+**`social_tendency(hits, query_bean) -> dict | None`(`cie/retrieval.py`):**
+
+- 取池 = 被同豆閘排除於 flavor 主估計的 hits:`bean_match==False`(任一級)**或** `grade=="C"`。池空 → `None`。
+- 回傳欄位:`reputed=true`、`confidence="low"`、`based_on_n`、`grades`(來源級別分布,如 `{"B":3}`)、`origins`、`varieties`、`bean_match_any`、`flavor_notes`(社群常見描述 top-N)、`axis_tendency`(各軸 `{band: low/med/high, mean}`,reputed 均值非主估計)、`note`(帶發表偏差提醒)。
+- **加性決策**:cross-bean 任一級永不定義風味;C 帶發表偏差(難喝的沒人貼)。`recommend` 與 `predict` 都附此欄。
+
+**冷啟動退回(`predict` 無同豆時):** `predicted_flavor` 走 `physics.coarse_flavor_axes`(coarse 0–10、`source="prior"`、**無區間**)+ warning;特色交給 `social_tendency`。此物理退回也讓 eval 對每個 holdout 仍有數值預測(維持方向排序覆蓋)。
+
+**分級召回(§3.1;`engine._recall`):** 先召回較大池(`top_k*3`、≥60),取 `A/B` 各 top_k 與其餘各 top_k 的**聯集**,但**仍依 pool 原生分數序回傳**——只「救援」少數同豆 A/B 不被大量 C 擠出,**不在同分時把 A/B 硬排到 C 前面**(否則 owner 讀證據時 C 自有 self 會被同分 B 擠掉,破 §16.3 多租戶讀可見性)。**不動 `weighted_estimate` 權重 / `assess`。**
 
 ### 16.5 與 Aiden 的整合前置
 

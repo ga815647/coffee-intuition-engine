@@ -113,6 +113,37 @@ def golden_cup_target(mechanism: BrewMechanism) -> dict:
     return {"target_ey": p.target_ey, "target_tds": p.target_tds, "note": p.note}
 
 
+# 無同豆校準時的『物理粗略』軸量級(§3.2 / §3.4:generic 大方向風味,非精確真值)。
+# 焙度帶/萃取的『確立方向』給保守 0-10 錨點;呼叫端標 source='prior'、無區間,
+# 並附 warning「物理粗略、非實測」。特色(具體風味詞)永遠交給 social_tendency,不在此。
+_COARSE_BASE = {"acidity": 5.0, "sweetness": 5.5, "bitterness": 4.0, "body": 5.0,
+                "aftertaste": 5.0, "balance": 5.5, "clarity": 5.5}
+
+
+def coarse_flavor_axes(bean, params: BrewParams) -> Dict[str, float]:
+    """無同豆鄰居時的風味軸『物理粗略量級』(0-10、coarse、非真值)。
+
+    只用焙度帶與萃取率的確立方向:淺焙→高酸高清晰、低苦低 body;深焙→低酸低清晰、高苦高 body;
+    萃取不足(EY<18)→升酸降甜;過萃(EY>22)→升苦降清晰。刻意 coarse,回傳值搭配
+    source='prior'、無區間,呼叫端標明『物理粗略、非實測』。
+    """
+    band = bean.roast_band() if hasattr(bean, "roast_band") else "unknown"
+    ey = params.ey_pct
+    axes = dict(_COARSE_BASE)
+    if band == "light":
+        axes["acidity"] += 1.5; axes["clarity"] += 1.0
+        axes["bitterness"] -= 1.0; axes["body"] -= 1.0
+    elif band == "dark":
+        axes["acidity"] -= 1.5; axes["clarity"] -= 1.0
+        axes["bitterness"] += 1.5; axes["body"] += 1.5
+    if ey is not None:
+        if ey < 18:
+            axes["acidity"] += 1.0; axes["sweetness"] -= 0.5; axes["balance"] -= 0.5
+        elif ey > 22:
+            axes["bitterness"] += 1.0; axes["clarity"] -= 0.5; axes["balance"] -= 0.5
+    return {a: round(min(10.0, max(0.0, v)), 1) for a, v in axes.items()}
+
+
 # ────────────────────────────── 偏酸 fix 方向:已知爭議 ──────────────────────────────
 # 鐵則:這裡**不選邊**。傳統「酸=萃取不足→增萃(磨細/升溫/延長)」是 working prior
 # (跨來源 convergent + 三軌物理先驗);UC Davis Coffee Center 感官研究(Frost / Batali /
