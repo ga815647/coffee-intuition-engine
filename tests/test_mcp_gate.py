@@ -12,11 +12,12 @@ import pytest
 from cie.mcp_principal import (
     GLOBAL_USER_ID, LOCAL_PRINCIPAL, OWNER_SELF_USER_ID, RESERVED_NAMESPACES,
     apply_write_trust, make_member_principal, make_reader_principal, register_write,
-    reset_write_counters, resolve_principal,
+    reset_write_counters, resolve_delete_scope, resolve_principal,
 )
 from cie.engine import Engine
 from cie.mcp_tools import (
-    do_list_customizations, do_log_calibration, do_promote_customization, do_query,
+    do_delete_calibration, do_list_customizations, do_log_calibration,
+    do_promote_customization, do_query,
 )
 from cie.schema import (
     BeanRoast, BrewMechanism, BrewParams, FlavorProfile, Grade, Process, Record,
@@ -385,3 +386,98 @@ def test_store_user_ids_read_filter_enforces_isolation(engine):
     assert alice_id not in global_only               # 限定 global → 過濾掉 alice
     assert all(h["payload"]["user_id"] == GLOBAL_USER_ID for h in engine.store.search(
         q, BrewMechanism.PERCOLATION, top_k=20, user_ids=[GLOBAL_USER_ID]))
+
+
+# ────────────────────────────── 刪除範圍閘:resolve_delete_scope(對稱寫入) ──────────────────────────────
+
+def test_delete_scope_reader_denied():
+    d = resolve_delete_scope(make_reader_principal())
+    assert d.ok is False and "唯讀" in d.error
+
+
+def test_delete_scope_member_confined_to_own_ns():
+    d = resolve_delete_scope(make_member_principal("member:alice", "alice"))
+    assert d.ok is True and d.allowed_user_id == "alice"
+
+
+def test_delete_scope_owner_unconfined():
+    d = resolve_delete_scope(LOCAL_PRINCIPAL)
+    assert d.ok is True and d.allowed_user_id is None   # owner 可刪任一
+
+
+# ────────────────────────────── 刪除端到端:member 只能刪自有 self(命門) ──────────────────────────────
+
+def test_delete_member_deletes_own_self_record(engine):
+    """member 刪自有 self → 成功;該筆從記憶體索引消失。"""
+    alice = make_member_principal("member:alice", "alice")
+    out = do_log_calibration(engine, alice, brew_mechanism="percolation", grade="C",
+                             origin="Ethiopia", process="washed", roast_agtron=74,
+                             method="V60", grind_um=652, user_id="self")
+    rid = out["id"]
+    assert _uid_of(engine, rid) == "alice"
+
+    res = do_delete_calibration(engine, alice, record_id=rid)
+    assert res["ok"] is True and res["deleted_memory"] == 1
+    assert _rec_of(engine, rid) is None              # 已從索引刪除
+
+
+def test_delete_member_cannot_delete_global(engine):
+    """命門:member 刪 global id → 命名空間不符,刪不到(ok=False),global 仍在。"""
+    # 取 fixture 既有的一筆 global id。
+    gid = next(r.id for r in engine.store.iter_records() if r.user_id == GLOBAL_USER_ID)
+    alice = make_member_principal("member:alice", "alice")
+    res = do_delete_calibration(engine, alice, record_id=gid)
+    assert res["ok"] is False and res["deleted_memory"] == 0
+    assert _rec_of(engine, gid) is not None          # global 未被刪
+
+
+def test_delete_member_cannot_delete_other_members_self(engine):
+    """命門:member A 拿到 member B 的 self id 也刪不掉(底層命名空間驗證)。"""
+    bob = make_member_principal("member:bob", "bob")
+    out = do_log_calibration(engine, bob, brew_mechanism="percolation", grade="C",
+                             origin="Ethiopia", process="washed", roast_agtron=74,
+                             method="V60", grind_um=653, user_id="self")
+    bob_id = out["id"]
+    alice = make_member_principal("member:alice", "alice")
+    res = do_delete_calibration(engine, alice, record_id=bob_id)
+    assert res["ok"] is False and res["deleted_memory"] == 0
+    assert _rec_of(engine, bob_id) is not None       # bob 的 self 未被刪
+    assert do_delete_calibration(engine, bob, record_id=bob_id)["ok"] is True  # bob 自己刪得掉
+
+
+def test_delete_reader_blocked(engine):
+    gid = next(r.id for r in engine.store.iter_records() if r.user_id == GLOBAL_USER_ID)
+    res = do_delete_calibration(engine, make_reader_principal(), record_id=gid)
+    assert res["ok"] is False and res.get("gate") == "write_trust"
+    assert _rec_of(engine, gid) is not None
+
+
+def test_delete_owner_can_delete_any(engine):
+    """owner 不受 confinement:可刪 member 的 self,也可刪 global。"""
+    out = do_log_calibration(engine, make_member_principal("member:alice", "alice"),
+                             brew_mechanism="percolation", grade="C",
+                             origin="Kenya", roast_agtron=70, user_id="self")
+    alice_id = out["id"]
+    assert do_delete_calibration(engine, LOCAL_PRINCIPAL, record_id=alice_id)["ok"] is True
+    assert _rec_of(engine, alice_id) is None
+
+    gid = next(r.id for r in engine.store.iter_records() if r.user_id == GLOBAL_USER_ID)
+    assert do_delete_calibration(engine, LOCAL_PRINCIPAL, record_id=gid)["ok"] is True
+    assert _rec_of(engine, gid) is None
+
+
+def test_delete_empty_record_id_rejected(engine):
+    res = do_delete_calibration(engine, make_member_principal("member:alice", "alice"),
+                                record_id="   ")
+    assert res["ok"] is False and "record_id" in res["error"]
+
+
+def test_delete_counts_against_rate_limit(monkeypatch, engine):
+    """刪除也算一次寫入(防灌爆);超限被擋。"""
+    monkeypatch.setattr("cie.mcp_principal.MEMBER_WRITE_LIMIT", 1)
+    reset_write_counters()
+    alice = make_member_principal("member:alice", "alice")
+    out = do_log_calibration(engine, alice, brew_mechanism="percolation", grade="C",
+                             origin="Kenya", roast_agtron=70, user_id="self")  # 用掉額度
+    res = do_delete_calibration(engine, alice, record_id=out["id"])
+    assert res["ok"] is False and res["gate"] == "rate_limit"

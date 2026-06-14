@@ -24,9 +24,10 @@ from cie.canonical import (
 from cie.config import Config
 from cie.engine import Engine
 from cie.mcp_principal import (
-    GLOBAL_USER_ID, make_member_principal, make_reader_principal, reset_write_counters,
+    GLOBAL_USER_ID, LOCAL_PRINCIPAL, make_member_principal, make_reader_principal,
+    reset_write_counters,
 )
-from cie.mcp_tools import do_log_calibration, do_query
+from cie.mcp_tools import do_delete_calibration, do_log_calibration, do_query
 from cie.rebuild import prime_serving_index
 from cie.schema import (
     AcidityType, BeanRoast, BrewMechanism, BrewParams, FlavorProfile, Grade, Process, Record,
@@ -60,7 +61,21 @@ class FakeD1:
         if head.startswith("CREATE"):
             return []
         if head.startswith("DELETE"):
-            self.rows.clear()
+            if "WHERE" in head:                  # 針對性刪除:DELETE ... WHERE id [AND user_id]
+                p = list(params or [])
+                rid = p[0] if p else None
+                changed = 0
+                if rid in self.rows:
+                    if "USER_ID" in head:        # confinement:命名空間須相符才刪
+                        uid = p[1] if len(p) > 1 else None
+                        if self.rows[rid].get("user_id") == uid:
+                            del self.rows[rid]
+                            changed = 1
+                    else:
+                        del self.rows[rid]
+                        changed = 1
+                return [{"results": [], "success": True, "meta": {"changes": changed}}]
+            self.rows.clear()                    # 無 WHERE = replace_all 的全表清除
             return [{"results": [], "success": True, "meta": {"changes": 0}}]
         if head.startswith("INSERT"):
             p = list(params or [])
@@ -222,6 +237,40 @@ def test_d1_select_by_user_filters():
     assert canon.select_by_user("nobody") == []
 
 
+# ────────────────────────────── 針對性刪除(WHERE id [AND user_id]) ──────────────────────────────
+
+def test_d1_delete_by_id_unconfined_owner():
+    """owner 刪除(user_id=None)→ WHERE id only,可刪任一(含 global)。回傳 changes=1。"""
+    canon = _canon(FakeD1())
+    g = _rec("Ethiopia", user_id=GLOBAL_USER_ID)
+    canon.extend([g, _rec("Kenya", user_id="alice")])
+    assert canon.delete(g.id) == 1                      # 不限命名空間 → 刪得掉 global
+    assert g.id not in {r.id for r in canon.iter_records()}
+    assert len(list(canon.iter_records())) == 1
+
+
+def test_d1_delete_confined_to_user_id():
+    """命門:給 user_id → SQL 加 `AND user_id`;非自有命名空間刪不掉(changes=0)。"""
+    canon = _canon(FakeD1())
+    g = _rec("Ethiopia", user_id=GLOBAL_USER_ID)
+    a = _rec("Kenya", user_id="alice")
+    canon.extend([g, a])
+
+    # alice 想刪 global → WHERE id=g AND user_id='alice' 不匹配 → 0,global 仍在。
+    assert canon.delete(g.id, "alice") == 0
+    assert g.id in {r.id for r in canon.iter_records()}
+    # alice 刪自有 → 匹配 → 1。
+    assert canon.delete(a.id, "alice") == 1
+    assert a.id not in {r.id for r in canon.iter_records()}
+
+
+def test_d1_delete_missing_id_returns_zero():
+    canon = _canon(FakeD1())
+    canon.append(_rec("Ethiopia", user_id="alice"))
+    assert canon.delete("no-such-id", "alice") == 0
+    assert canon.delete("no-such-id") == 0
+
+
 # ────────────────────────────── 工廠 / sink 選擇 ──────────────────────────────
 
 def test_canonical_backend_auto_detects_d1():
@@ -342,3 +391,53 @@ def test_member_write_does_not_reach_global_across_cold_start_d1():
     res = do_query(eng2, make_reader_principal(), brew_mechanism="percolation",
                    mode="recommend", origin="Ethiopia", process="washed", roast_agtron=74)
     assert res.get("evidence", []) == []                    # global 空 → reader 無證據
+
+
+# ────────────────────────────── 刪除:雙層 + 命名空間 confinement(端到端,D1) ──────────────────────────────
+
+def test_member_deletes_own_record_both_layers_and_no_resurrect():
+    """member 刪自有 self → D1 + 記憶體雙層皆刪;新行程冷啟動從 D1 重建後**不復活**。"""
+    cfg = _d1_cfg()
+    fake = FakeD1()
+    eng1 = Engine(store=VectorStore(cfg), canonical=_canon(fake, cfg))
+    alice = make_member_principal("member:alice", "alice")
+    out = do_log_calibration(eng1, alice, brew_mechanism="percolation", grade="C",
+                             origin="Ethiopia", process="washed", roast_agtron=74,
+                             method="V60", grind_um=651, acidity=7.4, user_id="self")
+    rid = out["id"]
+    assert [r.id for r in _canon(fake, cfg).iter_records()] == [rid]   # D1 有
+
+    res = do_delete_calibration(eng1, alice, record_id=rid)
+    assert res["ok"] is True
+    assert res["deleted_canonical"] == 1 and res["deleted_memory"] == 1
+    assert list(_canon(fake, cfg).iter_records()) == []               # D1 已空
+
+    # 冷啟動新行程:從 D1 重建 → 不復活。
+    eng2 = Engine(store=VectorStore(cfg), canonical=_canon(fake, cfg))
+    assert prime_serving_index(eng2, cfg) == 0
+    assert eng2.store.count() == 0
+
+
+def test_member_cannot_delete_global_or_others_self_via_d1():
+    """命門:member 刪 global / 他人 self → D1 SQL `AND user_id` 不匹配 → 不刪(ok=False)。"""
+    cfg = _d1_cfg()
+    fake = FakeD1()
+    eng = Engine(store=VectorStore(cfg), canonical=_canon(fake, cfg))
+
+    # owner 寫一筆 global;bob 寫一筆自有 self。
+    g = do_log_calibration(eng, LOCAL_PRINCIPAL, brew_mechanism="percolation", grade="B",
+                           origin="Kenya", roast_agtron=70, user_id="global")
+    gid = g["id"]
+    b = do_log_calibration(eng, make_member_principal("member:bob", "bob"),
+                           brew_mechanism="percolation", grade="C",
+                           origin="Brazil", roast_agtron=60, user_id="self")
+    bid = b["id"]
+
+    alice = make_member_principal("member:alice", "alice")
+    r_global = do_delete_calibration(eng, alice, record_id=gid)
+    r_other = do_delete_calibration(eng, alice, record_id=bid)
+    assert r_global["ok"] is False and r_global["deleted_canonical"] == 0
+    assert r_other["ok"] is False and r_other["deleted_canonical"] == 0
+
+    ids = {r.id for r in _canon(fake, cfg).iter_records()}
+    assert gid in ids and bid in ids                                 # 兩筆都還在

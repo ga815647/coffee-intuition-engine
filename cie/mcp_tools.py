@@ -23,6 +23,7 @@ from typing import List, Optional
 from .engine import Engine
 from .mcp_principal import (
     GLOBAL_USER_ID, Principal, apply_write_trust, current_principal, register_write,
+    resolve_delete_scope,
 )
 from .schema import (
     BeanRoast, BrewMechanism, BrewParams, FlavorProfile, Grade, Process, Record,
@@ -50,6 +51,15 @@ LOG_DESC = """寫回一筆校準(寫工具)。三層寫入:
 
 SWAP_DESC = """換泡法推味道(讀工具,純物理先驗)。跨機制僅定性、標高不確定
 (物理軸不足以涵蓋壓力/流動動力學);同機制較可信。請配合 predict() 在目標機制重新預測。"""
+
+DELETE_DESC = """刪除一筆校準記錄(寫工具,破壞性)。三層刪除隔離(對稱寫入 confinement):
+  - HTTP member(具命名空間 token):**只能刪自己 self 命名空間的記錄**;指定他人 / global 的 id →
+    底層 SQL 加 `AND user_id=自有` 強制,刪不到(回 ok=False、deleted=0)。
+  - 本機 stdio owner:可刪任一記錄(含 global,清理語料用;HTTP 永不解析為 owner)。
+  - reader:不可刪。
+雙層刪除:先刪 D1 canonical 真相(權威),再刪記憶體索引;冷啟動從 canonical 重建**不復活**。
+找你自己的 record_id:log_calibration 回傳的 id,或 query_flavor_map 證據(evidence)裡的 id。
+回傳 {"ok":bool, deleted_canonical, deleted_memory, count, ...};找不到 / 非自有 → ok=False。"""
 
 LIST_CUSTOM_DESC = """列出待審的個人客製記錄(self 客製層,非 global)。**owner / stdio 限定**。
 供晉升審查:逐筆檢視 member / 你自己累積的 self 校準,決定哪些值得升格為 global 客觀真值。
@@ -193,6 +203,22 @@ def do_method_swap(
     )
 
 
+def do_delete_calibration(engine: Engine, principal: Principal, *, record_id: str) -> dict:
+    """delete_calibration 的邏輯:過刪除範圍閘(reader 拒 / member 限自有 / owner 不限)+ 流量閘,
+    再交 engine 雙層刪除(canonical 先、記憶體後)。member 刪除隔離與寫入隔離同源(§16.2):
+    強制 `allowed_user_id` = 自有命名空間,引擎下游底層 SQL 加 `AND user_id` → 刪不到他人 / global。"""
+    rid = (record_id or "").strip()
+    if not rid:
+        return {"ok": False, "error": "record_id 不可為空。"}
+    decision = resolve_delete_scope(principal)
+    if not decision.ok:
+        return {"ok": False, "gate": "write_trust", "error": decision.error}
+    if not register_write(principal):  # 刪除也算一次寫入(防公開端被灌爆;owner 豁免)
+        return {"ok": False, "gate": "rate_limit",
+                "error": "寫入次數已達上限,請稍後再試(防灌爆)。"}
+    return engine.delete_calibration(rid, allowed_user_id=decision.allowed_user_id)
+
+
 # ────────────────────────────── 晉升邏輯(owner / stdio 限定) ──────────────────────────────
 
 def do_list_customizations(
@@ -277,7 +303,8 @@ def register_tools(mcp, engine: Engine, *, include_writes: bool = True,
     """把 do_* 註冊成 MCP 工具。工具讀 contextvar 取當前 principal:
     HTTP 由認證中介層設定(member / reader);stdio 未設定 → LOCAL_PRINCIPAL(owner,零回歸)。
 
-    include_writes(預設 True):掛 `log_calibration`(member 受限寫 / owner 自由寫)。
+    include_writes(預設 True):掛 `log_calibration` + `delete_calibration`(member 受限寫 /
+        刪自有 self;owner 自由寫 / 刪任一)。
     include_promotion(預設 False):掛 `list_customizations` / `promote_customization`
         ——**只在 stdio owner 門**(`mcp_server.py` 傳 True);HTTP 不掛 → 網路無 global 寫入 /
         晉升路徑(§16「三層」)。
@@ -344,6 +371,11 @@ def register_tools(mcp, engine: Engine, *, include_writes: bool = True,
                 sweetness=sweetness, bitterness=bitterness, body=body, aftertaste=aftertaste,
                 balance=balance, clarity=clarity, flavor_notes=flavor_notes, user_id=user_id,
             )
+
+        # 刪除工具:member 只能刪自有 self(底層 SQL `AND user_id` 強制)/ owner 可刪任一。
+        @mcp.tool(description=DELETE_DESC)
+        def delete_calibration(record_id: str) -> dict:
+            return do_delete_calibration(engine, current_principal(), record_id=record_id)
 
     # 晉升工具:**只在 stdio owner 門**註冊;HTTP 不掛 → 網路無 self→global 晉升路徑。
     if include_promotion:

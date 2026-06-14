@@ -152,6 +152,32 @@ class Engine:
         return {"ok": True, "id": rid, "count": self.store.count(),
                 "note": "已寫入。prediction 級不參與方向投票。"}
 
+    # ── 刪除校準(member 只刪自有 self;owner 可刪任一) ──
+    def delete_calibration(self, record_id: str, *,
+                           allowed_user_id: Optional[str] = None) -> dict:
+        """刪一筆校準。`allowed_user_id`=None → owner(可刪任一);否則只刪該命名空間自有
+        (member confinement:即便 id 猜中,非自有命名空間也刪不掉)。
+
+        持久化順序(對稱 log_calibration 的「真相先行」):**先刪 canonical 真相**(D1,權威 +
+        命名空間 confinement;其刪除列數是「是否真的擁有並刪掉」的權威信號),**再刪易失的記憶體
+        索引**。萬一只刪了 canonical → 下次冷啟動從 D1 重建即不復活(最終一致朝『已刪』收斂);
+        反序(先記憶體後 canonical)則會在冷啟動復活,故不採。
+        """
+        n_canon = 0
+        if self.canonical is not None and hasattr(self.canonical, "delete"):
+            n_canon = self.canonical.delete(record_id, allowed_user_id)
+        n_mem = 0
+        if hasattr(self.store, "delete"):
+            n_mem = self.store.delete(record_id, allowed_user_id)
+        deleted = (n_canon > 0) or (n_mem > 0)
+        return {
+            "ok": deleted, "id": record_id,
+            "deleted_canonical": n_canon, "deleted_memory": n_mem,
+            "count": self.store.count(),
+            "note": ("已刪除。冷啟動從 canonical 重建不復活。" if deleted
+                     else "找不到該記錄,或不在你的命名空間(member 只能刪自有 self)。"),
+        }
+
     # ── 工具 ──
     @staticmethod
     def _evidence(hits: List[dict], k: int = 5) -> List[dict]:

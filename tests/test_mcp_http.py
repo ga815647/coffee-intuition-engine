@@ -63,11 +63,13 @@ def test_root_public_no_auth(client):
 # ────────────────────────────── 網路面:讀 + member 受限寫,但無晉升 ──────────────────────────────
 
 def test_http_registers_member_write_but_no_promotion():
-    """網路面(HTTP)掛讀工具 + `log_calibration`(member 受限寫),但**不掛晉升工具**。
-    晉升 / 寫 global 只在本機 stdio owner 門 → 網路上沒有寫 global 的路徑(§16「三層」)。"""
+    """網路面(HTTP)掛讀工具 + member 受限寫(`log_calibration` / `delete_calibration`,
+    後者只能刪自有 self),但**不掛晉升工具**。晉升 / 寫 global 只在本機 stdio owner 門 →
+    網路上沒有寫 global 的路徑(§16「三層」)。"""
     _, mcp = server_http.build_app(config=_cfg(), engine=Engine(VectorStore()), auto_seed=False)
     names = sorted(t.name for t in asyncio.run(mcp.list_tools()))
-    assert names == ["log_calibration", "predict_method_swap", "query_flavor_map"]
+    assert names == ["delete_calibration", "log_calibration",
+                     "predict_method_swap", "query_flavor_map"]
     # 晉升工具(self→global)永不在 HTTP 出現。
     assert "promote_customization" not in names
     assert "list_customizations" not in names
@@ -218,8 +220,9 @@ def test_build_app_refuses_stateful_mode():
 # ────────────────────────────── stdio owner 門(唯一寫 global / 晉升,零回歸) ──────────────────────────────
 
 def test_stdio_entry_registers_all_tools_and_owner_principal():
-    """owner 門 stdio(mcp_server)註冊**全部 5 個**工具(含寫工具 + 晉升工具)、自動 seed、
-    預設身分 = LOCAL_PRINCIPAL(owner、can_write、不施讀過濾)→ 唯一能寫 global / 晉升,零回歸。"""
+    """owner 門 stdio(mcp_server)註冊**全部 6 個**工具(讀 + 寫 log/delete + 晉升 list/promote)、
+    自動 seed、預設身分 = LOCAL_PRINCIPAL(owner、can_write、不施讀過濾)→ 唯一能寫 global /
+    刪任一 / 晉升,零回歸。"""
     import importlib
 
     import mcp_server
@@ -227,8 +230,8 @@ def test_stdio_entry_registers_all_tools_and_owner_principal():
 
     names = sorted(t.name for t in asyncio.run(mcp_server.mcp.list_tools()))
     assert names == [
-        "list_customizations", "log_calibration", "predict_method_swap",
-        "promote_customization", "query_flavor_map",
+        "delete_calibration", "list_customizations", "log_calibration",
+        "predict_method_swap", "promote_customization", "query_flavor_map",
     ]
     assert mcp_server._engine.store.count() > 0  # 自動 seed
 

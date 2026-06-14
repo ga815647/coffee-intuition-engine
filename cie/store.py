@@ -70,6 +70,7 @@ class StoreBackend(Protocol):
                exclude_predictions: bool = True,
                user_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]: ...
     def count(self) -> int: ...
+    def delete(self, record_id: str, user_id: Optional[str] = None) -> int: ...
 
 
 # ────────────────────────────── Qdrant / 記憶體後端 ──────────────────────────────
@@ -176,6 +177,21 @@ class VectorStore:
 
     def count(self) -> int:
         return self.client.count(collection_name=self.collection, exact=True).count
+
+    # ── 刪除(member 只刪自有 self;owner 不限) ──
+    def delete(self, record_id: str, user_id: Optional[str] = None) -> int:
+        """刪一筆。`user_id` 給定時先驗該點命名空間 == user_id 才刪(member confinement,
+        不誤刪他人);None=不限(owner)。先 retrieve 驗存在 + 命名空間 → 回精準刪除數(0/1)。"""
+        qm = self._qm
+        got = self.client.retrieve(collection_name=self.collection, ids=[record_id],
+                                   with_payload=True, with_vectors=False)
+        if not got:
+            return 0
+        if user_id is not None and (got[0].payload or {}).get("user_id") != user_id:
+            return 0
+        self.client.delete(collection_name=self.collection,
+                           points_selector=qm.PointIdsList(points=[record_id]))
+        return 1
 
     # ── 全量列舉(匯出 / 重建用) ──
     def iter_records(self) -> Iterator[Record]:
@@ -312,6 +328,18 @@ class VectorizeStore:
             logger.warning("Vectorize info 取得失敗:%s", e)
             return -1
         return int(info.get("vectorCount", info.get("vectorsCount", -1)))
+
+    def delete(self, record_id: str, user_id: Optional[str] = None) -> int:  # pragma: no cover - 需網路
+        """刪一筆(get_by_ids 驗命名空間 → delete_by_ids)。`user_id` 給定時只刪自有。
+        Vectorize 最終一致且本上線不用(prod 走 memory + D1);保留以維持後端介面一致。"""
+        got = self.client.vectorize_get_by_ids(self.index, [record_id])
+        if not got:
+            return 0
+        md = (got[0] or {}).get("metadata") or {}
+        if user_id is not None and md.get("user_id") != user_id:
+            return 0
+        self.client.vectorize_delete_by_ids(self.index, [record_id])
+        return 1
 
     def ensure_index(self) -> None:  # pragma: no cover - 需金鑰,一次性設定
         """建立機制/過濾欄的 metadata index(冪等;已存在的錯誤忽略)。

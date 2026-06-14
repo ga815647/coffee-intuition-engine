@@ -270,6 +270,41 @@ def apply_write_trust(record: Record, principal: Principal) -> WriteDecision:
     return WriteDecision(ok=True, record=record, notes=notes)
 
 
+# ────────────────────────────── 刪除範圍(§16.2:刪除隔離與寫入隔離同源) ──────────────────────────────
+
+@dataclass
+class DeleteDecision:
+    """刪除範圍判定。ok=False(reader)時 error 說明;ok=True 時 allowed_user_id=None 表示
+    不限命名空間(owner 可刪任一),否則只能刪該命名空間自有(member confinement)。"""
+    ok: bool
+    allowed_user_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+def resolve_delete_scope(principal: Principal) -> DeleteDecision:
+    """決定一個 principal 可刪除的命名空間範圍(對稱 `apply_write_trust` 的寫入 confinement)。
+
+      - reader(`can_write=False`)→ 拒絕。
+      - member → 只能刪自有命名空間(`allowed_user_id = write_user_id`)。
+      - owner → 不限(`allowed_user_id=None`,可刪任一;清理語料用,僅 stdio)。
+
+    刪除隔離與寫入隔離同源:member 永遠刪不到 global / 他人 self——底層儲存層(D1 SQL 加
+    `AND user_id=自有`;記憶體先驗命名空間)強制,即便 id 猜中也刪不掉。
+    """
+    if not principal.can_write:
+        return DeleteDecision(
+            ok=False,
+            error=("此通道唯讀(reader),不可刪除。刪除需具命名空間的 member token"
+                   "(只能刪自己的 self 層)或本機 owner(stdio)。"))
+    if principal.role == "member":
+        ns = principal.write_user_id
+        if not ns:  # 防禦:member 必有命名空間(make_member_principal 恆設定)
+            return DeleteDecision(ok=False, error="member 缺命名空間,拒收(內部錯誤)。")
+        return DeleteDecision(ok=True, allowed_user_id=ns)
+    # owner:可刪任一(僅本機 stdio;HTTP 永不解析為 owner)
+    return DeleteDecision(ok=True, allowed_user_id=None)
+
+
 # ────────────────────────────── 寫入流量上限(防公開端被灌爆) ──────────────────────────────
 
 # 每命名空間每行程的寫入次數上限(簡單計數;owner=本機,豁免)。read 路徑不受限。

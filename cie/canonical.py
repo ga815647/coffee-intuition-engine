@@ -31,6 +31,7 @@ class CanonicalStore(Protocol):
     def extend(self, records: Iterable[Record]) -> int: ...
     def iter_records(self) -> Iterator[Record]: ...
     def replace_all(self, records: Iterable[Record]) -> int: ...
+    def delete(self, record_id: str, user_id: Optional[str] = None) -> int: ...
 
 
 def _records_to_jsonl(records: Iterable[Record]) -> str:
@@ -90,6 +91,24 @@ class LocalJsonlCanonical:
             f.write(text)
         return text.count("\n")
 
+    def delete(self, record_id: str, user_id: Optional[str] = None) -> int:
+        """刪一筆(讀全部 → 濾掉相符 → 整份重寫)。`user_id` 給定時只刪該命名空間自有
+        (member confinement:即便 id 猜中,非自有命名空間也刪不掉);None=不限(owner)。
+        回傳實際刪除筆數。"""
+        if not self.path.exists():
+            return 0
+        kept: List[Record] = []
+        removed = 0
+        for r in self.iter_records():
+            if r.id == record_id and (user_id is None or r.user_id == user_id):
+                removed += 1
+                continue
+            kept.append(r)
+        if removed:
+            with open(self.path, "w", encoding="utf-8") as f:
+                f.write(_records_to_jsonl(kept))
+        return removed
+
     def iter_records(self) -> Iterator[Record]:
         if not self.path.exists():
             return
@@ -145,6 +164,17 @@ class R2Canonical:
         text = _records_to_jsonl(records)
         self.client.r2_put_object(self.bucket, self.key, text)
         return text.count("\n")
+
+    def delete(self, record_id: str, user_id: Optional[str] = None) -> int:
+        """刪一筆(read-modify-write:讀整份 → 濾掉相符 → 整份覆寫)。`user_id` 給定時只刪自有。
+        ⚠️ 同 append 非並發安全(個人單寫者足夠)。回傳實際刪除筆數。"""
+        records = list(self.iter_records())
+        kept = [r for r in records
+                if not (r.id == record_id and (user_id is None or r.user_id == user_id))]
+        removed = len(records) - len(kept)
+        if removed:
+            self.client.r2_put_object(self.bucket, self.key, _records_to_jsonl(kept))
+        return removed
 
     def iter_records(self) -> Iterator[Record]:
         yield from _jsonl_to_records(self._read_text())
@@ -209,6 +239,17 @@ class D1Canonical:
             return (result[0] or {}).get("results") or []
         return []
 
+    @staticmethod
+    def _changes(result) -> int:
+        """從 d1_query result 取受影響列數(DELETE/UPDATE 的 meta.changes)。"""
+        if result and isinstance(result, list):
+            meta = (result[0] or {}).get("meta") or {}
+            try:
+                return int(meta.get("changes", 0) or 0)
+            except (TypeError, ValueError):  # pragma: no cover - 防禦
+                return 0
+        return 0
+
     # ── 寫 ──
     def append(self, record: Record) -> None:
         self.extend([record])
@@ -242,6 +283,21 @@ class D1Canonical:
         self._ensure_schema()
         self.client.d1_query(self.database_id, f"DELETE FROM {self.table}")
         return self.extend(records)
+
+    def delete(self, record_id: str, user_id: Optional[str] = None) -> int:
+        """刪一筆。`user_id` 給定時 SQL 加 `AND user_id = ?`——**member 刪除隔離命門**:
+        即便 id 猜中,非自有命名空間的列也刪不掉(WHERE 不匹配 → changes=0);
+        None=不限(owner 可刪任一,清理語料用)。回傳實際刪除列數(0/1)。"""
+        self._ensure_schema()
+        if user_id is None:
+            result = self.client.d1_query(
+                self.database_id, f"DELETE FROM {self.table} WHERE id = ?", [record_id])
+        else:
+            result = self.client.d1_query(
+                self.database_id,
+                f"DELETE FROM {self.table} WHERE id = ? AND user_id = ?",
+                [record_id, user_id])
+        return self._changes(result)
 
     # ── 讀 ──
     def iter_records(self) -> Iterator[Record]:

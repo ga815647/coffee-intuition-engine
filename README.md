@@ -39,9 +39,9 @@ water(控制變數)┘        ▲
 | `cie/seed.py` | A 級錨點 + 物理先驗 bootstrap |
 | `cie/demo.py` | `python -m cie.demo`:端到端跑四種推理 |
 | `cie/mcp_tools.py` | **單一工具註冊點**:`do_*` 邏輯 + `register_tools`;stdio 與 HTTP 共用一份 |
-| `cie/mcp_principal.py` | 身分解析(owner / member / reader)+ 寫入信任閘(member confinement + grade≤B,§16.2);transport 無關 |
-| `mcp_server.py` | **stdio = owner 門**(本機 / Claude Code 直連):可寫 global + 晉升,掛全部 5 工具 |
-| `server_http.py` | **HTTP = 網路面**(streamable-http):member 受限寫(只落自有 self)、雙 token 認證 + claude.ai CORS + `/health` |
+| `cie/mcp_principal.py` | 身分解析(owner / member / reader)+ 寫入信任閘(member confinement + grade≤B,§16.2)+ 刪除範圍閘(member 只刪自有 self,§16.6);transport 無關 |
+| `mcp_server.py` | **stdio = owner 門**(本機 / Claude Code 直連):可寫 global + 刪任一 + 晉升,掛全部 6 工具 |
+| `server_http.py` | **HTTP = 網路面**(streamable-http):member 受限寫 + 刪(`log_calibration` / `delete_calibration`,皆只落 / 只刪自有 self)、雙 token 認證 + claude.ai CORS + `/health` |
 
 ## 快速開始
 
@@ -62,7 +62,7 @@ python mcp_server.py
 
 把引擎接成 claude.ai / Claude Code 可掛載的 **remote MCP**,採**三層身分 + 人工晉升**模型:
 
-- **member(HTTP,`server_http.py`)= 受限寫。** 你日常用、分享給別人用,都走這。掛讀工具 + `log_calibration`,但寫入被**結構強制**只落呼叫者**自己的 self 客製命名空間**(`grade` 上限 B);指定 `global` / 他人 ns 一律被忽略並回 `trust_notes`。**member 寫不到 global、讀不到他人 self、永遠造不出 A 級。** token 外洩最壞是污染**該命名空間自己的** self 層(可整個丟棄),global 客觀真相毫髮無傷。
+- **member(HTTP,`server_http.py`)= 受限寫。** 你日常用、分享給別人用,都走這。掛讀工具 + `log_calibration` + `delete_calibration`,但寫入被**結構強制**只落呼叫者**自己的 self 客製命名空間**(`grade` 上限 B);指定 `global` / 他人 ns 一律被忽略並回 `trust_notes`。**刪除同源隔離**:`delete_calibration` 只能刪自己 self 命名空間的記錄(底層 SQL `AND user_id=自有` 強制,給他人 / global 的 id 也刪不到)。**member 寫不到 global、讀不到他人 self、刪不到他人 / global、永遠造不出 A 級。** token 外洩最壞是污染 / 刪光**該命名空間自己的** self 層(可整個丟棄),global 客觀真相毫髮無傷。
 - **owner(本機 stdio,`mcp_server.py`)= 唯一能寫 global / 唯一晉升者。** 校準與晉升只在你自己機器上,靠「跑在你的機器上」授權,不需任何網路 token。日常 member 訊號累積進 self 層;要升格為跨人共享的 global 客觀真值,owner 在本機 `list_customizations` 審查 → `promote_customization` 人工晉升。
 
 HTTP 層是**薄傳輸 + 認證 + 寫入閘**——檢索 / 收縮 / conformal / 機制三軌 / 物理先驗全留在 `cie.*`,與 stdio 共用同一份工具(`cie/mcp_tools.py`;HTTP 傳 `include_writes=True, include_promotion=False`,stdio 兩者 `True`)。設計見 `docs/DESIGN_v0.2.md` §13.6 / §16.2 / §16.3。
@@ -95,12 +95,12 @@ https://<你的 host>/mcp?token=<CIE_MCP_AUTH_TOKEN>
 
 **token(三層,§16):**
 
-| token | 角色 | 寫入 | 讀範圍 |
+| token | 角色 | 寫入 / 刪除 | 讀範圍 |
 |---|---|---|---|
-| `CIE_MCP_AUTH_TOKEN` | **member**(你個人,日常 + 分享) | 只落自己的 `self` 層;`grade≤B`;寫不到 global | global 客觀層 + 自己的 self |
-| `CIE_MCP_GUEST_TOKENS` 物件 `{token:user_id}` | **member**(訪客,各自命名空間) | 只落各自 `user_id` 的 self 層;`grade≤B`;硬隔離彼此 | global + 自己的 self(讀不到他人 self) |
-| `CIE_MCP_GUEST_TOKENS` 陣列 `[token]` | **reader**(純分享讀) | **無** | 只讀 global |
-| 本機 stdio(`LOCAL_PRINCIPAL`) | **owner**,唯一寫 global / 晉升 | A(須 protocol)/ B / C;`self` 或 `global`;可晉升 | 全部(不過濾) |
+| `CIE_MCP_AUTH_TOKEN` | **member**(你個人,日常 + 分享) | 寫 / 刪只限自己的 `self` 層;`grade≤B`;寫不到 / 刪不到 global | global 客觀層 + 自己的 self |
+| `CIE_MCP_GUEST_TOKENS` 物件 `{token:user_id}` | **member**(訪客,各自命名空間) | 寫 / 刪只限各自 `user_id` 的 self 層;`grade≤B`;硬隔離彼此 | global + 自己的 self(讀不到他人 self) |
+| `CIE_MCP_GUEST_TOKENS` 陣列 `[token]` | **reader**(純分享讀) | **無**(不可寫 / 不可刪) | 只讀 global |
+| 本機 stdio(`LOCAL_PRINCIPAL`) | **owner**,唯一寫 global / 晉升 | 寫 A(須 protocol)/ B / C;`self` 或 `global`;可刪任一;可晉升 | 全部(不過濾) |
 
 **寫 global / 晉升只在本機 Claude Code stdio**:`A` 級須附 `protocol`(人類感官真值來源),member 永不產生 A(上限 B,A 只能經 owner 晉升時帶 protocol);`grade=prediction` 為內部保留級、任何角色注入皆拒收(防 model collapse)。`global` / `self` 為保留命名空間,訪客 token 不得認領(`CIE_MCP_GUEST_TOKENS` 內遇到會 fail-closed 拒收)。
 
