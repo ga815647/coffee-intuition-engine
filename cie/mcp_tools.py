@@ -67,7 +67,8 @@ LIST_CUSTOM_DESC = """列出待審的個人客製記錄(self 客製層,非 globa
 
 PROMOTE_DESC = """把一筆個人客製記錄(self 層)晉升為 global 客觀真值。**owner / stdio 限定**。
 就地改寫該記錄 user_id→global、套用 global 鐵則:grade 須 A 或 B,A 級須附 protocol(如 SCA_cupping)。
-這是 self→global 的唯一通道(網路面永遠寫不到 global)。回傳 {"ok":bool, promoted_id, ...}。"""
+這是 self→global 的唯一通道(網路面永遠寫不到 global)。回傳 {"ok":bool, promoted_id, ...,
+snapshot_reminder};收尾請依 reminder 跑 `python -m cie.snapshot` 把 global 快照進 git(誤刪可復原)。"""
 
 
 def _bean(origin="", variety="", process="other", roast_agtron=None) -> BeanRoast:
@@ -290,9 +291,15 @@ def do_promote_customization(
     })
     out = engine.log_calibration(promoted)  # A 須 protocol 由 engine 單一把關
     if isinstance(out, dict) and out.get("ok"):
+        # curation 收尾提醒(非 git 副作用):晉升改動了 global,跑 snapshot 把全量 global 快照
+        # 進 git → 誤刪可復原。**一個 session 收尾跑一次**(非一筆一 commit);git 副作用只在
+        # 該 CLI,工具呼叫絕不碰 git。
         return {**out, "promoted_id": promoted.id, "from_user_id": src.user_id,
                 "to_grade": target.value,
-                "note": f"已將 {record_id} 從 self 層 '{src.user_id}' 晉升為 global({target.value})。"}
+                "note": (f"已將 {record_id} 從 self 層 '{src.user_id}' 晉升為 global"
+                         f"({target.value})。"),
+                "snapshot_reminder": "curation 收尾請跑 `python -m cie.snapshot` "
+                                     "把全量 global 快照進 git(誤刪可復原;一 session 一 commit)。"}
     return out
 
 

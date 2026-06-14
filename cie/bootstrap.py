@@ -2,6 +2,10 @@
 
     python -m cie.bootstrap            # canonical 為空時載入 corpus/global.jsonl
     python -m cie.bootstrap --force    # 清空 canonical 後整份重載(覆寫;謹慎)
+    python -m cie.bootstrap --force --path corpus/global.export.jsonl
+                                       # 災後整庫重建:從 snapshot 快照(策展種子+晉升)整份重灌
+                                       # ⚠️ --force=replace_all,會連 self 一起清。只還原 global
+                                       #    且不動 self → 改用 `python -m cie.snapshot --restore`(upsert)。
 
 之後跑 `python -m cie.rebuild` 從 canonical 用『當前』嵌入器重嵌、灌入向量庫
 (Vectorize / Qdrant / 記憶體)。**驗收**:rebuild 後向量庫筆數 ≈ corpus/global.jsonl
@@ -61,10 +65,17 @@ def main() -> None:
             stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
         except Exception:
             pass
-    force = "--force" in sys.argv[1:]
+    argv = sys.argv[1:]
+    force = "--force" in argv
+    path = CORPUS_PATH
+    for i, a in enumerate(argv):                 # --path <p> 或 --path=<p>(災後從 snapshot 重灌)
+        if a == "--path" and i + 1 < len(argv):
+            path = Path(argv[i + 1]).resolve()
+        elif a.startswith("--path="):
+            path = Path(a.split("=", 1)[1]).resolve()
     canonical = get_canonical()
-    n = bootstrap(canonical=canonical, force=force)
-    print(f"已將 corpus/global.jsonl 的 {n} 筆策展語料載入 canonical"
+    n = bootstrap(canonical=canonical, path=path, force=force)
+    print(f"已將 {path.name} 的 {n} 筆語料載入 canonical"
           f"({type(canonical).__name__})。")
     print("下一步:python -m cie.rebuild   # 從 canonical 重嵌、灌入向量庫")
 

@@ -1,0 +1,60 @@
+# CIE 全量 D1 備份(self + global)排程範本 — 三選一,不綁死平台。
+# 全量備份含 **self 個資**(各 guest 命名空間),目的地**必須私密**;CF 金鑰一律走平台 secret。
+# 對應:`python -m cie.export`(對 D1 唯讀、確定性排序;見 cie/export.py、DESIGN §15.3-B)。
+# 只 global 的可公開快照(誤刪可復原、進 git)是另一條:`python -m cie.snapshot`(§15.3-A)。
+#
+# ── 此檔不是 active workflow ──
+# 故意命名 *.example.yml(不在 .github/workflows/ 下)→ 不會自動跑。要啟用就複製到
+# .github/workflows/backup.yml 並填好 secret 與**私密**目的地。
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────── 範例 1:GitHub Action(每週,推私有目的地) ───────────────────────────
+# 前置:repo 須為 **private**(self 含個資);在 repo Settings → Secrets 設 CIE_CF_ACCOUNT_ID /
+# CIE_CF_API_TOKEN(最小權限 D1:Read 即可,備份唯讀)/ CIE_D1_DATABASE_ID。
+name: cie-self-backup
+on:
+  schedule:
+    - cron: "0 18 * * 0"   # 每週日 18:00 UTC(自行調整)
+  workflow_dispatch: {}     # 也允許手動觸發
+permissions:
+  contents: read            # 不需寫權限(備份產物走 artifact / 外部私密儲存)
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.10" }
+      - run: pip install -r requirements.txt
+      - name: Export full D1 (read-only)
+        env:
+          CIE_CF_ACCOUNT_ID: ${{ secrets.CIE_CF_ACCOUNT_ID }}
+          CIE_CF_API_TOKEN:  ${{ secrets.CIE_CF_API_TOKEN }}
+          CIE_D1_DATABASE_ID: ${{ secrets.CIE_D1_DATABASE_ID }}
+          CIE_CANONICAL_BACKEND: d1
+        run: python -m cie.export --out backups/d1-full-export.jsonl
+      # 私密目的地擇一(別 commit 進 repo 工作區歷史):
+      #  (a) 私有 artifact(隨 repo 權限,90 天保留):
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cie-d1-backup
+          path: backups/d1-full-export.jsonl
+          retention-days: 90
+      #  (b) 或推私有 R2 bucket:用 rclone / aws s3(S3 相容)上傳,endpoint 走 R2、金鑰走 secret。
+      #  (c) 或 push 到**另一個私有 backup repo**(deploy key),不放本 repo。
+
+# ─────────────────────────── 範例 2:VPS / 既有主機 cron(每週) ───────────────────────────
+# crontab -e 加一行(CF 金鑰放 ~/.config/cie/backup.env,chmod 600;别寫進 crontab 明文):
+#   0 18 * * 0  cd /srv/cie && set -a && . ~/.config/cie/backup.env && set +a && \
+#               python -m cie.export --out "/srv/private-backups/d1-$(date +\%Y\%m\%d).jsonl"
+# 目的地 /srv/private-backups 設 chmod 700;日期後綴保留歷史。
+
+# ─────────────────────────── 範例 3:Cloud Scheduler → Cloud Run job ───────────────────────────
+# 把 export 包成 Cloud Run **job**(非 service),CF 金鑰走 Secret Manager,輸出寫私有 GCS / R2:
+#   gcloud run jobs create cie-backup --image <IMAGE> --region asia-east1 \
+#     --set-secrets=CIE_CF_API_TOKEN=cie-cf-token:latest \
+#     --set-env-vars=CIE_CF_ACCOUNT_ID=...,CIE_D1_DATABASE_ID=...,CIE_CANONICAL_BACKEND=d1 \
+#     --command=python --args=-m,cie.export,--out,/tmp/bak.jsonl   # entrypoint 後再 gsutil cp 到私有 bucket
+#   gcloud scheduler jobs create http cie-backup-weekly --schedule="0 18 * * 0" \
+#     --uri="https://<region>-run.googleapis.com/.../jobs/cie-backup:run" --http-method=POST \
+#     --oauth-service-account-email=<runner-sa>

@@ -698,6 +698,34 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 
 **期待值(務實):** 離線雜湊嵌入本就不準,harness **不對 MAE 下硬門檻**;測試只斷言「協定可跑、每筆 A/B 留出一次、留出豆確被排除、覆蓋率與方向算得出、同機制配對、分機制統計成立、C 不當真值、無洩漏、無寫回」。真實準度數字待接 `workers_ai` 嵌入 + 真實資料後,用**同一 harness** 直接複用。
 
+### 15.3 備份 / 復原(global → git 一鍵復原 + self 選配私密全量) — ✅ 已落地
+
+**問題:** canonical 真相落在 **D1**(單一共用真相,§14.7)。D1 被誤刪 / 帳號出事,**global 客觀真相層**(策展種子 + owner 晉升 / 直接 global 寫入 / 修正)就沒了——而它正是跨人共享、最該保住的資產。**self 層**(各 guest 命名空間,持續變動,含個資)則需另一條**私密**備份。
+
+**設計:兩條互補的匯出,皆對 D1 唯讀、確定性排序。**
+
+| | §A `cie.snapshot`(global → git) | §B `cie.export`(全量 → 私密) |
+|---|---|---|
+| 內容 | **只 global**(self 排除) | **global + 各 self** |
+| 排序 | 依 `id`(穩定 diff:同 id 同行,修正只改該行) | 依 `(user_id, id)`(命名空間分群) |
+| 目的地 | `corpus/global.export.jsonl`(**入公開 git**) | `./backups/`(**gitignored**)/ 私有 R2 / 私有 repo |
+| 隱私 | global 無個資、無 token → 可公開 | **含 self 個資**(guest 命名空間)→ **絕不入公開 git**;token 從不入任何匯出 |
+| 用途 | 誤刪可一鍵復原 global、晉升審計軌跡 | 選配排程的完整備份(連 self 一起) |
+
+**§A 為何另存 `corpus/global.export.jsonl`(不覆蓋 `corpus/global.jsonl`):** `corpus/global.jsonl` 是 `tools/qa_merge.py` 由 `corpus/raw/*.jsonl`(provenance + 對抗式降級表,鍵在 `(file, lineno)`)**確定性重生**的**策展種子**;角色是「可重現的初始語料」。owner 晉升的 self 記錄 / 直接 global 寫入 / 修正**沒有 raw provenance**,塞回 raw 會破壞 qa_merge 可重現性。故快照另存一檔:
+
+> `corpus/global.export.jsonl` = **完整 live global 快照**(策展種子 + 累積的晉升 / global 寫入 / 修正) = **災後復原的權威來源**。`corpus/global.jsonl` 維持策展種子角色不變。
+
+**§A 綁定 promotion(但 git 副作用只在 CLI):** `promote_customization` 改動了 global,但**工具呼叫絕不做 git 副作用**——只在成功回傳附 `snapshot_reminder` 欄,提醒 owner 在 curation **session 收尾**跑 `python -m cie.snapshot`(匯出 global → `git add/commit` 該單一檔)。**一個 session 一個 commit**(非一筆一 commit)。`git_commit_snapshot` 防呆:非 git 工作區 / 無變更 → 跳過(不產空 commit),且只 stage 快照檔。
+
+**§A 復原語義(load-bearing):** `restore_global`(`python -m cie.snapshot --restore`)用 **`canonical.extend`(D1 = INSERT OR REPLACE 逐筆 upsert)**,**只還原 / 覆寫 global、不碰 self**(self 不在此檔;絕不因復原 global 而清掉 guest 的 self)。刻意**不是** `replace_all`(那會 `DELETE FROM` 連 self 一起清)。檔內混入非 global 列 → 拒絕(`ValueError`,防灌錯命名空間)。整庫災後重建(D1 全空、要連策展種子)另走 `python -m cie.bootstrap --force --path corpus/global.export.jsonl`(replace_all)。round-trip 測試:D1-A(global+self)→ export → restore 進 fresh D1-B → global 一致、self 不外洩、再 restore 冪等。
+
+**§B 隱私(鐵則):** self 列帶各 guest 命名空間(user_id)= 個資。`cie.export` 預設輸出 `./backups/`(已 .gitignore);排程備份送**私密**目的地(本機 / 私有 R2 / 私有 repo)。**檔內不含任何 token**。排程交使用者設(CF 金鑰走平台 secret,備份唯讀只需 `D1:Read`),範本見 `tools/backup_self.example.yml`(三選一:GitHub Action 每週推私有目的地 / VPS cron / Cloud Scheduler → Cloud Run job;不綁死平台)。
+
+**唯讀驗證:** 兩條匯出皆只發 `SELECT`(`iter_records`),測試斷言**零 INSERT/DELETE/UPDATE/REPLACE**(`tests/test_snapshot.py`,假 D1 記每句 SQL)。對 live D1 可安全跑一次唯讀匯出。
+
+**接線:** `cie/snapshot.py`(`export_global` / `restore_global` / `git_commit_snapshot` + CLI)、`cie/export.py`(`export_all` + CLI),共用 `portability.export_jsonl` / `read_jsonl`;`mcp_tools.do_promote_customization` 加 `snapshot_reminder`;`cie/bootstrap.py` 加 `--path`(災後從快照重灌)。零新 pip 依賴(git 走 `subprocess`)。測試 `tests/test_snapshot.py`(15 項:global-only / 確定性 / 唯讀 / upsert 不清 self / round-trip 冪等 / 拒非 global / Local 後端 / 全量含 self / 晉升 reminder / owner-only / git 防呆)。
+
 ---
 
 ## 16. 三層 + 人工晉升:共享與寫入信任(接 remote MCP 前的設計依據)

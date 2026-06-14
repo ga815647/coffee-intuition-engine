@@ -18,3 +18,6 @@ secrets/
 data/canonical.jsonl
 data/canonical/
 eval/report.json
+# 全量 D1 備份(python -m cie.export):含 self 個資(各 guest 命名空間),**絕不入公開 git**。
+# 只 global 的快照(可公開、誤刪可復原)走 cie.snapshot → corpus/global.export.jsonl(該檔入庫)。
+backups/
