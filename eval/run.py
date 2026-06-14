@@ -149,8 +149,12 @@ def _score_holdouts(engine: Engine, holdouts: List[Record],
         if ev_ids & holdout_ids:  # 縱深防禦:鄰居只能來自 store;store 已排除 holdout 時恆 True
             no_holdout_in_evidence = False
         pf = pred["predicted_flavor"]
+        # 硬湊(hard-stretch):無同豆鄰居 → predicted_flavor 退回物理粗略(§16.4)。
+        # 物理退回時所有軸 source=="prior";有同豆時各軸為 neighbors/shrunk(value=None 的軸被略過,
+        # 永不以 source=="prior" 入列)。故「全軸 prior」⟺ 該筆是硬湊出來的、非同豆實測。
+        hard_stretch = bool(pf) and all(e.get("source") == "prior" for e in pf.values())
         rec_out: Dict = {"id": h.id, "mechanism": h.params.brew_mechanism.value,
-                         "grade": h.grade.value, "axes": {}}
+                         "grade": h.grade.value, "hard_stretch": hard_stretch, "axes": {}}
         for a in FLAVOR_AXES:
             true_v = getattr(h.flavor, a)
             est = pf.get(a)
@@ -257,6 +261,7 @@ def _by_mechanism(per_record: List[Dict]) -> Dict[str, Dict]:
         dm = _direction_metric(pts)
         d_pairs = sum(dm[a]["n_pairs"] for a in FLAVOR_AXES)
         d_conc = sum(dm[a]["concordant"] for a in FLAVOR_AXES)
+        n_hs = sum(1 for r in recs if r.get("hard_stretch"))
         out[mech] = {
             "n_holdout": len(recs),
             "n_axis_points": len(errs),
@@ -265,8 +270,32 @@ def _by_mechanism(per_record: List[Dict]) -> Dict[str, Dict]:
             "coverage": round(_mean([1.0 if c else 0.0 for c in covs]), 4) if covs else None,
             "direction_pairs": d_pairs,
             "direction_acc": round(d_conc / d_pairs, 4) if d_pairs else None,
+            "hard_stretch_rate": round(n_hs / len(recs), 4) if recs else None,
         }
     return out
+
+
+def _hard_stretch(per_record: List[Dict]) -> Dict:
+    """硬湊率:holdout 中『無同豆鄰居、退回物理粗略』的比例(整體 + 分機制)。
+
+    衡量召回庫對「這支豆的特色」的同豆覆蓋有多薄——率越高 = 越多豆只能硬湊物理先驗、
+    答不出個別風味特色(§16.4)。**只統計 A/B holdout**(C 永不當 holdout)。
+    補 Tier-1 同豆料(§4)應讓此率下降。
+    """
+    n = len(per_record)
+    n_hs = sum(1 for r in per_record if r.get("hard_stretch"))
+    by_mech: Dict[str, Dict] = {}
+    for mech in sorted({r["mechanism"] for r in per_record}):
+        recs = [r for r in per_record if r["mechanism"] == mech]
+        h = sum(1 for r in recs if r.get("hard_stretch"))
+        by_mech[mech] = {"n": len(recs), "n_hard_stretch": h,
+                         "rate": round(h / len(recs), 4) if recs else None}
+    return {
+        "n": n, "n_hard_stretch": n_hs,
+        "rate": round(n_hs / n, 4) if n else None,
+        "by_mechanism": by_mech,
+        "note": "無同豆鄰居→物理粗略退回的 holdout 占比;越低=同豆覆蓋越扎實。",
+    }
 
 
 # ────────────────────────────── 評測主體:分層 k-fold CV(預設) ──────────────────────────────
@@ -332,6 +361,7 @@ def run_cv_eval(k: int = DEFAULT_K, config: Config = CONFIG,
         "overall": overall,
         "direction": direction,
         "by_mechanism": _by_mechanism(all_per_record),
+        "hard_stretch": _hard_stretch(all_per_record),
         "leakage_checks": {
             "holdout_ids_excluded": ids_excluded,
             "no_holdout_in_evidence": no_ev_leak,
@@ -374,6 +404,7 @@ def run_eval(dataset_path: Path = DATASET_PATH, store: Optional[StoreBackend] = 
         "overall": overall,
         "direction": direction,
         "by_mechanism": _by_mechanism(per_record),
+        "hard_stretch": _hard_stretch(per_record),
         "leakage_checks": {
             "holdout_ids_excluded": holdout_ids_excluded,
             "no_holdout_in_evidence": no_holdout_in_evidence,
@@ -427,6 +458,15 @@ def format_report(r: Dict) -> str:
     lines.append("-" * 72)
     lines.append(f"{'overall':<12}{ov['n']:>5} {_fmt(ov['mae']):>7} {_fmt(ov['rmse']):>7} "
                  f"{_fmt(ov['coverage'], 2):>8}")
+
+    # 硬湊率(無同豆鄰居→物理粗略退回的占比;§16.4 / §4)
+    hs = r.get("hard_stretch")
+    if hs:
+        lines.append("-" * 72)
+        per = "  ".join(f"{m}={mm['rate']:.0%}({mm['n_hard_stretch']}/{mm['n']})"
+                        for m, mm in hs["by_mechanism"].items())
+        rate = "—" if hs["rate"] is None else f"{hs['rate']:.1%}"
+        lines.append(f"硬湊率(無同豆→物理退回): {rate}  ({hs['n_hard_stretch']}/{hs['n']})   {per}")
 
     lines.append("-" * 72)
     lc = r["leakage_checks"]

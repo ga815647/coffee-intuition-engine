@@ -842,3 +842,22 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 - **晉升工具不變**:`delete_calibration` 隨 `include_writes` 掛載(HTTP + stdio 皆有);晉升仍 owner-only。
 - 找 `record_id`:`log_calibration` 回傳的 id,或 `query_flavor_map` 證據(evidence)裡的 id。
 - 測試:`tests/test_mcp_gate.py`(`resolve_delete_scope` 三層、member 刪自有成功 / 刪 global / 他人 self 被擋、reader 不可刪、owner 刪任一、空 id 拒收、刪除計入流量上限);`tests/test_d1_canonical.py`(D1 `DELETE WHERE id [AND user_id]` 單測、member 刪自有雙層皆刪 + 冷啟動不復活、member 刪 global / 他人 self 經 D1 SQL 不匹配而擋下)。
+
+### 16.7 Tier-1 分層詳盡覆蓋 + 硬湊率(hard-stretch)度量(承 §16.4)
+
+§16.4 規定「風味特色只借同豆」。其代價是:**召回庫對某 (產地×處理法×機制) 格沒有同豆料時,`predict.predicted_flavor` 只能硬湊物理粗略先驗**(`source="prior"`、無區間)。本節定下「這個硬湊有多普遍」的度量,與「把常見豆鋪平」的資料側回應。
+
+**硬湊率(hard-stretch rate;`eval/run.py`):** holdout 中『無同豆鄰居 → 全軸退回物理粗略』的占比(整體 + 分機制)。判定:`predicted_flavor` 全軸 `source=="prior"` ⟺ 該筆硬湊(同豆時各軸為 `neighbors`/`shrunk`,永不以 `prior` 入列)。**只統計 A/B holdout**(C 永不當 holdout,§15.2)。率越高 = 越多豆答不出個別風味特色。報告於 CV 與 dataset 兩路徑、`format_report` 印出。
+
+**Tier-1 覆蓋報告(`tools/coverage_report.py`,§4.1):** 對常見產地 × 處理法(× 機制)網格,依**來源分級**(A/B/C)計數、標空格(`★` Kenya×natural 等優先缺口),並回報**單元錨點覆蓋率**——某 (origin,process,mechanism) 是否有 `variety=""` 的單元錨點。Tier-1 的定義(產地集/各產地處理法/機制)**直接取自 `tools/seed_tier1.py`**,單一真相不漂移(`tests/test_coverage_tier1.py` 釘住「seed 補的筆數 == 報告的缺錨點數」)。
+
+**Tier-1 缺口填補(`tools/seed_tier1.py`,§4.2–4.3):** 對常見格補 **C 級單元級風味原型**記錄。誠實分級鐵則:
+- 一律 **grade=C**(一般公認的產地×處理法風味原型 = 社群 / 教科書共識,非某一支經量測的批次;C 只壓量級、不定義方向、永不當 holdout)。**A 永遠保留給 owner 閉環真值**,外部料不入 A(§5)。
+- **不抄任何烘豆商的專有杯測詞**(§4.4):`flavor_notes` 用通用描述,`source` 誠實標 `tier1:community origin×process flavor archetype (general knowledge, derived; not a roaster's proprietary notes)`,**不偽造特定 URL**。
+- **`variety=""` 單元錨點(關鍵)**:錨點門檻看「該格有無 `variety=""` 記錄」而非「格全空」。因同豆閘對**雙方都具體且不同**的 variety 判為非同豆(§16.4)——一格內若全是特定品種的批次,彼此不互為同豆、查詢仍硬湊;`variety=""` 錨點對全品種寬鬆放行才真正鋪平該格(同時填全空格 **與** 品種破碎格)。C 級低權重(0.1),既有 A/B 真值主導、不被稀釋。冪等:對同 (origin,process,mechanism) 錨點不重覆寫。
+
+**落地結果(離線雜湊嵌入;`corpus/global.jsonl` 446→537,+91 筆 C 級單元錨點):**
+- **結構錨點覆蓋(嵌入器無關 = 真正的資料缺口)**:origin×process **53%→100%**(缺口 22→0);單元錨點 **8%→100%**(缺 91→0)。**★ Kenya×natural 0 筆 → 三機制全覆蓋**(`predict` 由硬湊物理改為同豆鄰居,evidence 首位即該 Kenya 錨點)。
+- **實測硬湊率(離線、受召回限制)**:CV 5-fold **58.3%(189/324)→ 49.7%(161/324)**;分機制 immersion 60%→50%、percolation 50%→41%、pressure 71%→66%。overall MAE 1.088→0.996。
+- **誠實落差說明**:實測硬湊率(49.7%)未貼近結構上界(0%),因 (a) 離線雜湊嵌入**召回不力**——同豆錨點存在卻未進 top-k(真實 bge-m3 語意召回預期大幅改善);(b) 殘留硬湊主要是**結構上正確該硬湊**者:blank-origin 泛用配方(~43,非單豆特色查詢)、多產地義式拼配(`origin` 含 `/`)、`process="other"` 的 pressure 單品;(c) 少數 Tier-1 範圍外的小眾產地(hawaii/china/uganda/taiwan…)。即「Tier-1 常見豆」已鋪平,殘留非未填的 Tier-1 缺口。**離線不下 MAE/硬湊率硬門檻**(承 §15.2)。
+- 測試:`tests/test_coverage_tier1.py`(硬湊率整體/分機制 + 旗標綁真實引擎、coverage 空格/★優先/錨點偵測、seed 全 C/`variety=""`/global/誠實來源 + Kenya×natural 三機制 + 對自身輸出冪等 + 與 coverage 單一真相一致)。
