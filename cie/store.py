@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any, Dict, Iterator, List, Optional, Protocol
 
 from .config import CONFIG
@@ -24,6 +25,25 @@ from .embedding import LocalHashEmbedder, get_embedder
 from .schema import BrewMechanism, Record
 
 logger = logging.getLogger("cie.store")
+
+# Qdrant 點 id **必為 UUID(或無號整數)**。Record.id 多為 uuid4(合法),但 owner 策展條目
+# 可有刻意固定的可讀 id(如 contested-acidity-direction-ucdavis,為 INSERT OR REPLACE 冪等與
+# 穩定 snapshot diff 而固定)。對非 UUID 的 id 用 uuid5 **決定性**映射成合法點 id;canonical
+# 真相 id **不變**(evidence / delete / promote 一律走真實 id)。否則單一可讀 id 會讓 qdrant
+# 的 all-or-nothing upsert(prime_serving_index)整批崩潰 → 冷啟動 serving 索引全空。
+_POINT_ID_NAMESPACE = uuid.UUID("b1e9c0de-c0ff-ee00-1234-c1e500000001")
+
+
+def point_id(record_id: str) -> str:
+    """把 Record.id 映成合法的 qdrant 點 id。已是 UUID → 正規化原樣;否則 uuid5 決定性雜湊。
+
+    決定性保證:同一 record_id 永遠映到同一點 id,故 upsert 冪等、delete 可精準命中。
+    """
+    s = str(record_id)
+    try:
+        return str(uuid.UUID(s))
+    except (ValueError, AttributeError, TypeError):
+        return str(uuid.uuid5(_POINT_ID_NAMESPACE, s))
 
 
 # ────────────────────────────── 共用 payload 建構 ──────────────────────────────
@@ -111,8 +131,9 @@ class VectorStore:
 
     @staticmethod
     def _payload(r: Record) -> Dict[str, Any]:
-        # 含 `_canonical` 全量 JSON,供無損 iter_records / 匯出。
-        return {**record_to_payload(r), "_canonical": r.model_dump_json()}
+        # `_id` 保留**真實** record id(點 id 可能被 point_id 正規化/雜湊);evidence/刪除用它。
+        # `_canonical` 全量 JSON,供無損 iter_records / 匯出。
+        return {"_id": r.id, **record_to_payload(r), "_canonical": r.model_dump_json()}
 
     # ── 寫入 ──
     def upsert(self, record: Record) -> str:
@@ -120,7 +141,8 @@ class VectorStore:
         vec = self.embedder.embed(record.build_embedding_text())
         self.client.upsert(
             collection_name=self.collection,
-            points=[qm.PointStruct(id=record.id, vector=vec, payload=self._payload(record))],
+            points=[qm.PointStruct(id=point_id(record.id), vector=vec,
+                                   payload=self._payload(record))],
         )
         return record.id
 
@@ -132,7 +154,7 @@ class VectorStore:
             return 0
         vecs = self.embedder.embed_batch([r.build_embedding_text() for r in records])
         points = [
-            qm.PointStruct(id=r.id, vector=v, payload=self._payload(r))
+            qm.PointStruct(id=point_id(r.id), vector=v, payload=self._payload(r))
             for r, v in zip(records, vecs)
         ]
         self.client.upsert(collection_name=self.collection, points=points)
@@ -174,7 +196,12 @@ class VectorStore:
                 collection_name=self.collection, query_vector=vec, query_filter=flt,
                 limit=top_k, with_payload=True,
             )
-        return [{"id": h.id, "score": h.score, "payload": h.payload} for h in hits]
+        # 回傳**真實** record id(payload._id;點 id 可能被 point_id 正規化/雜湊),
+        # 讓 evidence / delete_calibration / promote 用得到的 id 對得上 canonical 真相。
+        return [
+            {"id": (h.payload or {}).get("_id", h.id), "score": h.score, "payload": h.payload}
+            for h in hits
+        ]
 
     def count(self) -> int:
         return self.client.count(collection_name=self.collection, exact=True).count
@@ -184,14 +211,15 @@ class VectorStore:
         """刪一筆。`user_id` 給定時先驗該點命名空間 == user_id 才刪(member confinement,
         不誤刪他人);None=不限(owner)。先 retrieve 驗存在 + 命名空間 → 回精準刪除數(0/1)。"""
         qm = self._qm
-        got = self.client.retrieve(collection_name=self.collection, ids=[record_id],
+        pid = point_id(record_id)  # 真實 id → 點 id(與 upsert 對稱),非 UUID 的 id 也能精準命中
+        got = self.client.retrieve(collection_name=self.collection, ids=[pid],
                                    with_payload=True, with_vectors=False)
         if not got:
             return 0
         if user_id is not None and (got[0].payload or {}).get("user_id") != user_id:
             return 0
         self.client.delete(collection_name=self.collection,
-                           points_selector=qm.PointIdsList(points=[record_id]))
+                           points_selector=qm.PointIdsList(points=[pid]))
         return 1
 
     # ── 全量列舉(匯出 / 重建用) ──
