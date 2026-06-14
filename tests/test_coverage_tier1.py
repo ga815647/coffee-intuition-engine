@@ -164,9 +164,10 @@ def test_single_c_anchor_predict_confidence_stays_honest():
     """PR3 §B:只有單一 C 同豆錨點 → predicted_flavor 雖 source=neighbors,信心仍誠實低。
 
     結構保證:`assess` 的 high 需 A 級權重佔比 ≥ 0.30;全 C(a_total=0)→ ratio=0 → 永不 high。
+    (PR4:用**同品種** Geisha C 錨點才算同豆風味——variety 嚴格化後空白錨點不再餵指名品種查詢。)
     """
     store = VectorStore()
-    store.upsert(_rec("Ethiopia Yirgacheffe", "", grade=Grade.C))  # 單一 C 單元錨點(variety="")
+    store.upsert(_rec("Ethiopia Yirgacheffe", "Geisha", grade=Grade.C))  # 單一同品種 C 錨點
     out = Engine(store).predict(_yirg_geisha(), _perc())
 
     # 同豆錨點把 predicted_flavor 抬離物理 prior(source=neighbors)…

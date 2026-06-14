@@ -52,10 +52,17 @@ class Engine:
 
     @staticmethod
     def _same_bean(bean: BeanRoast, hits: List[dict]) -> List[dict]:
-        """同豆鄰居(§3.2):origin 主產地 token + variety + process 三欄皆符。"""
+        """風味同豆鄰居(§3.2):origin 主產地 token + variety + process 皆符。
+
+        **`strict_variety=True`**:風味特色越特異越不可借鄰居——查詢指名了 variety(如耶加藝妓)時,
+        variety 空白的泛用單元錨點**不算同豆風味**(藝妓≠一般耶加;否則 §4.2 那批 variety="" 錨點會
+        變成所有指名品種的萬用風味捐贈者=破鐵則)。此閘只管 `predict` 的風味;recommend/diagnose 的
+        沖煮大方向仍用全鄰居(物理可遷移)。被踢出者落 social_tendency(共用述詞,不致消失)。
+        """
         proc = bean.process.value if bean.process else ""
         return [h for h in hits
-                if bean_match(bean.origin, bean.variety, proc, h.get("payload"))[0]]
+                if bean_match(bean.origin, bean.variety, proc, h.get("payload"),
+                              strict_variety=True)[0]]
 
     # ── 推薦起手參數 ──
     def recommend(self, bean: BeanRoast, mechanism: BrewMechanism,

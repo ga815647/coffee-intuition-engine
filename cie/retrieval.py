@@ -19,6 +19,7 @@ GRADE_WEIGHT = {"A": 1.0, "B": 0.4, "C": 0.1, "prediction": 0.0}
 
 MIN_NEIGHBORS = 3          # 少於此 → 收縮力道強 / 退回先驗
 MIN_A_WEIGHT_RATIO = 0.30  # top 結果 A 級權重佔比下限,否則降信心(防 C 級洗票)
+MIN_EFFECTIVE_WEIGHT = 1.0  # 聚合有效權重 Σ(grade×conf×sim) 下限;低於此即便鄰居「數量」夠也強制 low
 SHRINK_PRIOR_STRENGTH = 3.0  # 群組先驗的等效樣本數(貝氏收縮)
 
 
@@ -94,11 +95,18 @@ def weighted_estimate(
 
 
 def assess(hits: List[dict]) -> tuple[float, str, List[str]]:
-    """評估鄰居品質:A 級權重佔比 → 信心旗標。"""
+    """評估鄰居品質 → 信心旗標。兩道誠實閘:
+
+    1. **A 級權重佔比** ≥ `MIN_A_WEIGHT_RATIO`(30%)才可能 high(防 C 級量大洗票方向)。
+    2. **聚合有效權重** Σ(grade×conf×sim) ≥ `MIN_EFFECTIVE_WEIGHT`(1.0),否則即便鄰居
+       「數量」湊夠也**強制 low**——數量夠但有效樣本趨零的假 medium 不算有把握(誠實不確定,
+       鐵則 §4;不動 GRADE_WEIGHT,只在 count 旗標上加有效樣本地板)。
+    """
     warnings: List[str] = []
     if not hits:
         return 0.0, "low", ["無相符鄰居:退回物理先驗,量保守、區間寬。"]
-    total = sum(_weight(h) for h in hits) or 1e-9
+    eff = sum(_weight(h) for h in hits)        # 聚合有效權重(非鄰居計數)
+    total = eff or 1e-9
     a_total = sum(_weight(h) for h in hits if h["payload"].get("grade") == "A")
     ratio = a_total / total
 
@@ -112,6 +120,14 @@ def assess(hits: List[dict]) -> tuple[float, str, List[str]]:
     elif len(hits) >= 2:
         flag = "medium"
     else:
+        flag = "low"
+    # 有效樣本過小(n_eff<1):聚合有效權重趨零 → 強制 low(覆蓋 count 給的 medium)。
+    # high 門檻(A 級佔比 ≥30%)本身不變;這是其上的有效樣本地板,殺「數量湊夠但訊號趨零」的假信心。
+    if eff < MIN_EFFECTIVE_WEIGHT:
+        if flag != "low":
+            warnings.append(
+                f"有效樣本過小(n_eff<1,Σ權重={eff:.2f}<{MIN_EFFECTIVE_WEIGHT:.1f}):退回低信心。"
+            )
         flag = "low"
     return round(ratio, 3), flag, warnings
 
@@ -157,23 +173,31 @@ def _band(v: float) -> str:
 
 def bean_match(
     q_origin: Optional[str], q_variety: Optional[str], q_process: Optional[str],
-    payload: Optional[dict],
+    payload: Optional[dict], *, strict_variety: bool = False,
 ) -> Tuple[bool, str]:
     """同豆閘(§3.2):origin 主產地 token **且** variety **且** process 皆符才算同豆。
 
     **origin = 身分錨點**:雙方都要有主產地 token 且相等才可能同豆——缺 origin 的「泛用沖煮知識」
     料(無特定豆)不是「這支豆」,只能進 recommend 大方向(全鄰居),永不定義某豆的風味特色
     (對齊決策 1;否則 61 筆 blank-origin 料會變成所有豆的萬用風味捐贈者=破鐵則)。
-    **variety / process = 子屬性**:沿用「任一方未指定 = 該欄放行」的寬鬆(specificity 降 'low'),
-    讓只給部分資訊的查詢/料仍能在同產地內對上;雙方皆具體且符 = 'high'。回傳 (是否同豆, specificity)。
+    **variety / process = 子屬性**:預設沿用「任一方未指定 = 該欄放行」的寬鬆(specificity 降 'low'),
+    讓只給部分資訊的查詢/料仍能在同產地內對上;雙方皆具體且符 = 'high'。
+
+    **`strict_variety`(風味同豆閘專用,§3.2)**:風味「這隻豆的特色」越特異越不可借鄰居——查詢
+    **指名了 variety**(如耶加藝妓)時,**鄰居 variety 空白 → 不算同豆風味**(空白單元錨點是該產地
+    泛用基準,不是某特定品種的真值;藝妓≠一般耶加)。只收緊 variety 這條特異度軸;process 維持
+    寬鬆。查詢未指名 variety 時不受影響(空白錨點仍是合法同產地基準)。回傳 (是否同豆, specificity)。
     """
     p = payload or {}
     qo, ho = origin_main_token(q_origin), origin_main_token(p.get("origin"))
     if not qo or not ho or qo != ho:   # origin 無法正向確認相同 → 非同豆
         return False, "low"
+    qv, hv = _norm(q_variety), _norm(p.get("variety"))
+    # 風味嚴格化:查詢指名品種而鄰居空白 → 非同豆(泛用錨點不得當特異品種風味真值)。
+    if strict_variety and qv and not hv:
+        return False, "low"
     specificity = "high"
-    for q, h in ((_norm(q_variety), _norm(p.get("variety"))),
-                 (proc_norm(q_process), proc_norm(p.get("process")))):
+    for q, h in ((qv, hv), (proc_norm(q_process), proc_norm(p.get("process")))):
         if not q or not h:             # 子屬性任一方未指定 → 放行,特異度降 low
             specificity = "low"
             continue
@@ -196,6 +220,10 @@ def social_tendency(hits: List[dict], query_bean, top_notes: int = 6) -> Optiona
 
     取「被 §3.2 同豆閘排除於 flavor 主估計」的 hits:`bean_match==False`(任一級)**或** grade==C。
     無可參考 → None。**永不呼叫 weighted_estimate、不流進 predicted_flavor 特色。**
+
+    一致性(§3.2):此處與風味同豆閘(`_same_bean`)**共用同一述詞**(`strict_variety=True`)——
+    被嚴格化踢出風味的空白單元錨點(查詢指名品種、鄰居 variety 空白)會落進此池當同產地 reputed
+    參考,不致兩邊都漏接而消失(現況錨點皆 C、本就經 grade==C 進池;共用述詞以防日後 B 錨點漏接)。
     """
     q_origin, q_variety, q_process = _bean_fields(query_bean)
 
@@ -203,7 +231,7 @@ def social_tendency(hits: List[dict], query_bean, top_notes: int = 6) -> Optiona
     pool: List[dict] = []
     for h in hits:
         p = h.get("payload") or {}
-        bm, _ = bean_match(q_origin, q_variety, q_process, p)
+        bm, _ = bean_match(q_origin, q_variety, q_process, p, strict_variety=True)
         if bm:
             bean_match_any = True
         if (not bm) or p.get("grade") == "C":   # 跨豆(任一級)或 C → 降級進社群傾向池

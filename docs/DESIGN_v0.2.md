@@ -803,18 +803,20 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 **核心決策:召回範圍隨問題特異度而變。**
 
 - **風味「這支豆的特色」(`predict.predicted_flavor`)只借同豆鄰居。** 「耶加雪菲藝妓喝起來怎樣」只能由同一支豆(同產地 + 同品種 + 同處理法)的校準回答;**跨豆的風味(含 A/B)永不寫進 `predicted_flavor`**。理由:風味特色是豆的身分屬性,別支豆的具體風味套到這支豆是幻覺。
+  - **variety 嚴格化(PR4 §1;`_same_bean` 傳 `strict_variety=True`)**:風味越特異越不可借鄰居——查詢**指名了品種**(如耶加藝妓)時,**鄰居 variety 空白 → 不算同豆風味**。否則 §4.2 那批 `variety=""` 單元錨點會變成所有指名品種的萬用風味捐贈者(藝妓借「泛用耶加」描述=破鐵則)。**只收緊 variety 這條特異度軸;process 維持寬鬆;查詢未指名品種時不受影響**(空白錨點仍是合法同產地泛用基準)。被踢出者落 `social_tendency`(§3.3 共用述詞,不致消失)。**此閘只管 `predict` 風味;recommend/diagnose 大方向仍用全鄰居。**
 - **沖煮「大方向」(`recommend.suggested_params`、`diagnose`)可借廣鄰居。** 起手研磨/溫度/比例、過酸苦的調整方向是**物理可遷移**的(跨產地/品種仍有效),故 recommend/diagnose 不限同豆。
 - **跨豆 / 社群的風味只降級進 `social_tendency`**(additive 旁註),與客觀估計**並列、不混入**:`reputed=true`、`confidence="low"`、不流入 `predicted_flavor`、**不呼叫 `weighted_estimate`**。
 
-**同豆閘 `bean_match(q_origin, q_variety, q_process, payload) -> (bool, specificity)`(`cie/retrieval.py`):**
+**同豆閘 `bean_match(q_origin, q_variety, q_process, payload, *, strict_variety=False) -> (bool, specificity)`(`cie/retrieval.py`):**
 
 - **origin = 身分錨點(非對稱)**:雙方都要有可解析的主產地 token(`origin_main_token`:小寫去通用詞後第一個有意義 token,`Ethiopia Yirgacheffe`→`ethiopia`)且**相等**,否則 `False`。**刻意偏離「未指定即放行」的字面對稱**:語料中有 61 筆 **blank-origin** 的泛用沖煮知識料,若對 origin 也套對稱寬鬆,這些料會變成**所有豆的萬用風味捐贈者**(任一同處理法查詢都「同豆」)→ 破核心決策。故 blank-origin 料只能進大方向(全鄰居),永不定義某豆的風味特色。
-- **variety / process = 子屬性(對稱寬鬆)**:沿用「任一方未指定 → 該欄放行,`specificity` 降 `low`」,讓只給部分資訊的查詢/料仍能在**同產地內**對上;雙方皆具體且符 → `high`;雙方皆具體但不同 → `False`。
-- 單元驗收(`tests/test_neighbor_scope.py`):耶加藝妓 vs 巴拿馬藝妓(差 origin)→ `False`;vs 耶加 Heirloom(差 variety)→ `False`;blank-origin → `False`;查詢未填 variety vs 指定料 → `True/low`。
+- **variety / process = 子屬性(對稱寬鬆)**:預設沿用「任一方未指定 → 該欄放行,`specificity` 降 `low`」,讓只給部分資訊的查詢/料仍能在**同產地內**對上;雙方皆具體且符 → `high`;雙方皆具體但不同 → `False`。
+- **`strict_variety`(PR4 §1,風味同豆閘專用)**:`True` 時只收緊 variety——查詢**指名了品種而鄰居 variety 空白 → `False`**(空白單元錨點是該產地泛用基準,不是某特定品種的真值)。查詢未指名品種時不觸發(`qv` 空 → 不套此規則);process 不受影響。`_same_bean` 與 `social_tendency` 共用 `strict_variety=True`,確保被風味閘踢出的空白錨點一致地落進社群傾向池(不致兩邊都漏接而消失)。預設 `False` 維持 recommend/diagnose 大方向的寬鬆。
+- 單元驗收(`tests/test_neighbor_scope.py`):耶加藝妓 vs 巴拿馬藝妓(差 origin)→ `False`;vs 耶加 Heirloom(差 variety)→ `False`;blank-origin → `False`;查詢未填 variety vs 指定料 → `True/low`;**`strict_variety` 下耶加藝妓 vs 空白耶加錨點 → `False`(改現身 `social_tendency`),泛用耶加查詢 vs 同錨點 → `True`(不回歸)**。
 
 **`social_tendency(hits, query_bean) -> dict | None`(`cie/retrieval.py`):**
 
-- 取池 = 被同豆閘排除於 flavor 主估計的 hits:`bean_match==False`(任一級)**或** `grade=="C"`。池空 → `None`。
+- 取池 = 被同豆閘排除於 flavor 主估計的 hits:`bean_match==False`(任一級,**`strict_variety=True` 共用述詞**)**或** `grade=="C"`。池空 → `None`。被 variety 嚴格化踢出風味的空白單元錨點即在此現身(同產地 reputed 參考)。
 - 回傳欄位:`reputed=true`、`confidence="low"`、`based_on_n`、`grades`(來源級別分布,如 `{"B":3}`)、`origins`、`varieties`、`bean_match_any`、`flavor_notes`(社群常見描述 top-N)、`axis_tendency`(各軸 `{band: low/med/high, mean}`,reputed 均值非主估計)、`note`(帶發表偏差提醒)。
 - **加性決策**:cross-bean 任一級永不定義風味;C 帶發表偏差(難喝的沒人貼)。`recommend` 與 `predict` 都附此欄。
 
@@ -868,4 +870,5 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 - **實測硬湊率(離線、受召回限制)**:CV 5-fold **58.3%(189/324)→ 49.7%(161/324)**;分機制 immersion 60%→50%、percolation 50%→41%、pressure 71%→66%。overall MAE 1.088→0.996。
 - **誠實落差說明**:實測硬湊率(49.7%)未貼近結構上界(0%),因 (a) 離線雜湊嵌入**召回不力**——同豆錨點存在卻未進 top-k(真實 bge-m3 語意召回預期大幅改善);(b) 殘留硬湊主要是**結構上正確該硬湊**者:blank-origin 泛用配方(~43,非單豆特色查詢)、多產地義式拼配(`origin` 含 `/`)、`process="other"` 的 pressure 單品;(c) 少數 Tier-1 範圍外的小眾產地(hawaii/china/uganda/taiwan…)。即「Tier-1 常見豆」已鋪平,殘留非未填的 Tier-1 缺口。**離線不下 MAE/硬湊率硬門檻**(承 §15.2)。
 - **單錨點不假信心(PR3 §B):** seeded 的 C 錨點雖讓 `predict.predicted_flavor.source=neighbors`,但**信心仍誠實低**。`assess` 的 `high` 需 A 級權重佔比 ≥ 30%;單一/眾多 C(`a_total=0`)→ `ratio=0` → **結構上永不 `high`**(僅 1 鄰居→`low`、多 C→至多 `medium`),且 `n_effective` 小、稀疏與 A 級權重低警告皆在。GRADE_WEIGHT 不變。
-- 測試:`tests/test_coverage_tier1.py`(硬湊率整體/分機制 + 旗標綁真實引擎、coverage 空格/★優先/錨點偵測、**seeded≠covered 兩層分級**、**單 C 錨點 predict 信心誠實低 + 大量 C 不洗出 high**、seed 全 C/`variety=""`/global/誠實來源 + Kenya×natural 三機制 + 對自身輸出冪等 + 與 coverage 單一真相一致);分級召回 `tests/test_neighbor_scope.py::test_graded_recall_keeps_same_bean_ab`(大量跨豆 C 不擠掉同豆 A/B)。
+- **n_eff<1 強制 low(PR4 §2;誠實信心地板):** `assess` 除了看鄰居**數量**,還計**聚合有效權重** `Σ(grade×conf×sim)`。`eff < MIN_EFFECTIVE_WEIGHT`(1.0,tunable)時即便鄰居數湊夠也**強制 `low`** + warning「有效樣本過小(n_eff<1)」。修破口:肯亞日曬 `predict` 撈到 2 筆全跨產地鄰居(`eff≈0.06`、A 佔比 0)原報 **medium**(只數鄰居數),現誠實壓回 **low**;對照組(`eff≥1`)維持 medium 不誤殺。**`high` 門檻(A 佔比 ≥30%)與 GRADE_WEIGHT 皆不變**,此為其上的有效樣本地板。
+- 測試:`tests/test_coverage_tier1.py`(硬湊率整體/分機制 + 旗標綁真實引擎、coverage 空格/★優先/錨點偵測、**seeded≠covered 兩層分級**、**單 C 錨點 predict 信心誠實低 + 大量 C 不洗出 high**、seed 全 C/`variety=""`/global/誠實來源 + Kenya×natural 三機制 + 對自身輸出冪等 + 與 coverage 單一真相一致);`tests/test_neighbor_scope.py`(分級召回 load-bearing、**variety 嚴格化:空白錨點不入指名品種風味/落 social_tendency + 泛用查詢不回歸**、**n_eff<1 強制 low / eff≥1 不誤殺**)。

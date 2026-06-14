@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from cie.engine import Engine
-from cie.retrieval import bean_match, origin_main_token
+from cie.retrieval import assess, bean_match, origin_main_token
 from cie.schema import BeanRoast, BrewMechanism, BrewParams, FlavorProfile, Grade, Process, Record
 from cie.store import VectorStore
 
@@ -172,3 +172,91 @@ def test_graded_recall_rescues_low_score_same_bean_ab(store):
     # 證明分級是必要的:純分數 top-3 會排除它(B 分數排第 6)
     naive_top3 = {h["id"] for h in sorted(pool, key=lambda h: -h["score"])[:3]}
     assert "h99" not in naive_top3
+
+
+# ────────────── variety specificity 嚴格化:空白錨點不得當特異品種風味真值(PR4 §1) ──────────────
+
+def test_bean_match_strict_variety_blank_neighbor():
+    """`strict_variety`:查詢指名品種 + 鄰居空白品種 → 非同豆(只收緊 variety 這條)。"""
+    q = ("Ethiopia Yirgacheffe", "Geisha", "washed")
+    blank_var = {"origin": "Ethiopia Yirgacheffe", "variety": "", "process": "washed"}
+    # 預設寬鬆:放行,specificity low(同產地泛用基準)
+    assert bean_match(*q, blank_var) == (True, "low")
+    # 嚴格:查詢指名 Geisha、鄰居空白品種 → 非同豆(藝妓≠泛用耶加)
+    assert bean_match(*q, blank_var, strict_variety=True)[0] is False
+    # 嚴格但查詢未指名品種 → 仍放行(只收緊「查詢指名品種」這條,不破壞泛用查詢)
+    q_generic = ("Ethiopia Yirgacheffe", "", "washed")
+    assert bean_match(*q_generic, blank_var, strict_variety=True)[0] is True
+    # 嚴格 + 雙方皆具體且符 → 仍同豆 high(不誤殺真同品種)
+    same = {"origin": "Ethiopia Yirgacheffe", "variety": "Geisha", "process": "washed"}
+    assert bean_match(*q, same, strict_variety=True) == (True, "high")
+
+
+def test_strict_variety_blank_anchor_excluded_from_flavor(store):
+    """§4.2 單元錨點皆 variety="";耶加藝妓 predict 不得借「泛用耶加」風味寫進 predicted_flavor。
+
+    空白錨點改現身 social_tendency(同產地 reputed 參考,共用述詞不致消失),predicted_flavor
+    退回物理粗略(全軸 source=prior)+ 低信心。
+    """
+    recs = [_rec("Ethiopia Yirgacheffe", "", grade=Grade.C, notes=["citrus", "tea"],
+                 acidity=6.5, sweetness=6.0, body=4.0) for _ in range(3)]
+    eng = _engine(store, recs)
+    out = eng.predict(_yirg_geisha(), _perc_params())            # 查詢 variety=Geisha
+
+    pf = out["predicted_flavor"]
+    assert pf and all(v["source"] == "prior" for v in pf.values())  # 空白錨點不入 → 物理粗略
+    assert out["confidence_flag"] != "high"
+
+    st = out["social_tendency"]
+    assert st is not None and st["reputed"] is True              # 空白錨點落社群傾向(沒消失)
+    assert st["bean_match_any"] is False                          # 嚴格化下不算同豆
+    assert "citrus" in st["flavor_notes"]
+    assert "Ethiopia Yirgacheffe" in st["origins"]
+
+
+def test_generic_variety_query_still_uses_blank_anchor(store):
+    """不回歸:查詢**未指名**品種 → 空白品種錨點仍是合法同產地基準,可入 predicted_flavor。"""
+    recs = [_rec("Ethiopia Yirgacheffe", "", grade=Grade.B, notes=["citrus"],
+                 acidity=6.5, sweetness=6.0, body=4.0) for _ in range(2)]
+    eng = _engine(store, recs)
+    generic = BeanRoast(origin="Ethiopia Yirgacheffe", variety="",
+                        process=Process.WASHED, roast_agtron=74.0)
+    out = eng.predict(generic, _perc_params())
+    assert out["predicted_flavor"]["acidity"]["source"] != "prior"   # 空白錨點入風味(同產地基準)
+    assert out["social_tendency"] is None                            # 同豆且非 C → 無社群池
+
+
+# ────────────── n_eff<1 強制 low:數量湊夠但有效樣本趨零的假信心壓回(PR4 §2) ──────────────
+
+def _hit(grade: str, score: float, conf: float = 0.6) -> dict:
+    return {"id": "x", "payload": {"grade": grade, "confidence": conf}, "score": score}
+
+
+def test_assess_small_effective_weight_forces_low():
+    """2 鄰居(count→medium)但聚合有效權重 <1(全 C、低相似)→ 強制 low + warning。"""
+    hits = [_hit("C", 0.3), _hit("C", 0.3)]      # eff ≈ 2×0.1×0.6×0.3 ≈ 0.036
+    _ratio, flag, warnings = assess(hits)
+    assert flag == "low"
+    assert any("有效樣本過小" in w for w in warnings)
+
+
+def test_assess_sufficient_effective_weight_keeps_medium():
+    """充足有效權重(eff≈2)→ 不被壓回,維持 medium(不誤殺真有料的)。"""
+    hits = [_hit("B", 1.0, conf=1.0) for _ in range(5)]   # eff = 5×0.4×1.0×1.0 = 2.0
+    _ratio, flag, warnings = assess(hits)
+    assert flag == "medium"                              # len≥3 無 A → 非 high;eff≥1 → 不壓
+    assert not any("有效樣本過小" in w for w in warnings)
+
+
+def test_predict_low_effective_weight_forces_low_confidence(store):
+    """肯亞日曬 predict 只撈到 2 筆跨產地 C 鄰居(有效權重趨零)→ low(非 count 給的 medium)。"""
+    recs = [_rec("Brazil Cerrado", "Catuai", grade=Grade.C, process=Process.NATURAL, acidity=4.0),
+            _rec("Colombia Huila", "Caturra", grade=Grade.C, process=Process.NATURAL, acidity=5.0)]
+    eng = _engine(store, recs)
+    kenya = BeanRoast(origin="Kenya Nyeri", variety="SL28",
+                      process=Process.NATURAL, roast_agtron=74.0)
+    params = BrewParams(brew_mechanism=BrewMechanism.PERCOLATION, water_temp_c=92.0,
+                        brew_ratio=15.0, grind_um=300.0, tds_pct=1.35, ey_pct=20.0)
+    out = eng.predict(kenya, params)
+    assert out["confidence_flag"] == "low"                       # 2 鄰居本會 medium,eff<1 壓回
+    assert any("有效樣本過小" in w for w in out["warnings"])
