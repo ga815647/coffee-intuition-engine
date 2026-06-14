@@ -657,6 +657,16 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 
 **測試(`tests/test_serving_index.py`,全離線假 R2):** `maybe_get_canonical` R2 強掛 sink、`prime_serving_index` 觸發條件與重建、**member 寫入撐過冷啟動且仍受讀隔離 / 未污染 global**、canonical 失敗擋住 store upsert(durability)、`build_app` 冷啟動走 prime 非種子。
 
+#### 14.7.1 冷啟動完整性護欄(PR6,defense-in-depth)
+
+**痛點(實際發生過,c3aff37→4c35d25):** owner 策展條目帶刻意可讀 id(`contested-acidity-direction-ucdavis`,為 INSERT OR REPLACE 冪等與穩定 snapshot diff 而固定)→ qdrant 點 id 須 UUID → `upsert_many` 的 **all-or-nothing** 批次因這一筆整批崩 → `prime_serving_index` 冷啟動即炸 → in-memory 索引**全空** → **538 筆全退物理先驗,而 `/health` 仍回 200**。「優雅降級到 prior」把整站故障偽裝成正常(全 prior 看起來像「很多沒覆蓋的豆」)。root cause 已由 `store.point_id()`(非 UUID id → uuid5 決定性映射,canonical 真實 id 不變)修掉;PR6 補兩道**結構**防線,讓此失效模式永不再無聲復發。
+
+- **Item 1 — `upsert_many(skip_errors=...)` 對單筆壞記錄 resilient:** 預設 `skip_errors=False`(正常寫入 / member `log_calibration` 仍 **fail loud**,錯誤浮上來)。**僅冷啟動 prime 路徑傳 `skip_errors=True`**:整批 upsert 失敗時降級**逐筆隔離**(`_upsert_isolated`)——壞記錄 `log WARNING`(印 id + 原因)+ skip + 計數,好記錄照進,**絕不歸零整批、絕不靜默**。`import_records` 透傳此旗標;跳掉幾筆的後果交由 Item 2 門檻把關。
+- **Item 2 — `prime_serving_index` 載入後斷言 serving 筆數 ≈ canonical 應載入量,不符 fail loud:** 比對 `store.count()` 與 **canonical 非-prediction 去重**應載入量(對齊基準:濾掉 prediction〔鐵則5〕+ 同 id 去重〔晉升雙版 / append-only 重複〕,避免假落差)。**以「落差比例」而非絕對值觸發**:`served < min_ratio(0.9) × expected` → 丟 `ServingIndexIntegrityError` **boot-time fail-closed**(對齊 `validate_guest_token_config`):`server_http.build_app` / `mcp_server.py` 啟動時 raise → Cloud Run **不切流量到壞 revision、續用舊健康版**。**空-canonical 合法不誤殺**(`0 < 0.9×0` 不成立,全新 / 未 bootstrap 部署過關);少量 skip 在門檻內容忍。其他重建失敗(如 canonical 後端不可達)仍只 `log ERROR` + 續行(不讓容器起不來),但——
+- **`/health` 永遠回報 `serving_index_count`(live `store.count()`)+ `canonical_count`(prime 時的 expected,暫存於 `engine.serving_canonical_count`):** 就算沒觸發 fail-closed,落差也隨時可見,不再被「全退 prior + /health 200」靜默偽裝。
+
+**測試(`tests/test_cold_start_integrity.py`):** 混合批(1 壞 + 2 好)skip_errors=True → 載入 2 / count≠0 / 有印 id 的 WARNING;預設 strict → raise 且全有全無不留半筆;嚴重短缺(全 upsert 失敗)→ `ServingIndexIntegrityError`;空-canonical → 不誤殺;健康全載 → 過且暫存基準;門檻內少量 skip → 不 fail-closed。`/health` 兩個計數欄位見 `tests/test_mcp_http.py`。
+
 ---
 
 ## 15. Canonical 真相持久層 + 盲測評測協定

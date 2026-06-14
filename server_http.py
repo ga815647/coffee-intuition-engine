@@ -40,7 +40,7 @@ from cie.mcp_principal import (
     validate_guest_token_config,
 )
 from cie.mcp_tools import register_tools
-from cie.rebuild import prime_serving_index
+from cie.rebuild import ServingIndexIntegrityError, prime_serving_index
 from cie.seed import seed as seed_store
 
 logger = logging.getLogger("cie.server_http")
@@ -140,14 +140,22 @@ class TokenAuthMiddleware:
 
 # ────────────────────────────── public 路由 ──────────────────────────────
 
-def _health_handler(config, mcp_path: str):
+def _health_handler(config, mcp_path: str, engine: "Engine"):
     async def health(_request: Request) -> JSONResponse:
+        # PR6:永遠回報 serving 索引筆數與冷啟動載入基準,讓「空 / 短缺索引」隨時可見
+        # (即便沒觸發 fail-closed)——不再被「全退物理先驗 + /health 200」靜默偽裝成正常。
+        try:
+            serving = engine.store.count()
+        except Exception:  # pragma: no cover - 防禦:store 不可用不該讓 /health 502
+            serving = -1
         return JSONResponse({
             "name": "coffee-intuition-engine",
             "mcp_endpoint": mcp_path,
             "auth": "Authorization: Bearer <token> 或 ?token=<token>",
             "auth_configured": auth_is_configured(config),
             "transport": "streamable-http",
+            "serving_index_count": serving,
+            "canonical_count": getattr(engine, "serving_canonical_count", None),
             "status": "ok",
         })
     return health
@@ -199,12 +207,18 @@ def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = 
     # **不掛晉升工具**(include_promotion=False)→ 網路無 self→global / global 寫入路徑;晉升只在 stdio。
     register_tools(mcp, eng, include_writes=True, include_promotion=False)
 
-    # 生產自幹 index:冷啟動從共用 R2 canonical 重建 in-memory 索引(memory+R2 才觸發)。
+    # 生產自幹 index:冷啟動從共用 canonical(D1/R2)重建 in-memory 索引(memory + d1/r2 才觸發)。
     try:
         primed = prime_serving_index(eng, config)
-    except Exception:  # 冷啟動重建失敗不該讓容器起不來(/health 仍綠、查詢退回物理先驗)。
+    except ServingIndexIntegrityError:
+        # PR6 fail-closed:serving 索引空 / 嚴重短缺於 canonical → **拒啟動**(raise 出 build_app)。
+        # Cloud Run 不切流量到這個壞 revision、續用舊健康版;勝過讓殘缺索引把查詢靜默退回先驗。
+        logger.error("冷啟動 serving 索引完整性不足;fail-closed 拒啟動。", exc_info=True)
+        raise
+    except Exception:  # 其他重建失敗(如 canonical 後端不可達)不讓容器起不來;/health 顯示落差。
         primed = None
-        logger.error("冷啟動從 R2 canonical 重建失敗;以現有索引續行。", exc_info=True)
+        logger.error("冷啟動從 canonical 重建失敗;以現有索引續行(/health 會顯示 serving_index_count 落差)。",
+                     exc_info=True)
     if primed is not None:
         logger.info("冷啟動:從 R2 canonical 重建 in-memory 索引 %d 筆(嵌入器 %s)。",
                     primed, eng.store.model_id)
@@ -226,7 +240,7 @@ def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = 
     mcp_path = mcp.settings.streamable_http_path
 
     # public 路由插到最前(/ 與 /health 在 /mcp 之前比對)。
-    health = _health_handler(config, mcp_path)
+    health = _health_handler(config, mcp_path, eng)
     app.router.routes.insert(0, Route("/health", health, methods=["GET"]))
     app.router.routes.insert(0, Route("/", health, methods=["GET"]))
 

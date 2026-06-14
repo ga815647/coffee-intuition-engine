@@ -44,8 +44,11 @@ def read_jsonl(path: PathLike) -> List[Record]:
     return records
 
 
-def import_records(records: List[Record], store) -> int:
+def import_records(records: List[Record], store, skip_errors: bool = False) -> int:
     """用 store 的『當前嵌入器』重新嵌入 records → upsert。回傳寫入(去重後)筆數。
+
+    `skip_errors`(僅冷啟動 prime 傳 True):批次 upsert 失敗時降級逐筆隔離,壞記錄
+    log + skip、好記錄照進(見 store.upsert_many);預設 False(正常匯入仍 fail loud)。
 
     換模型 / 換後端 / 重建索引的核心:**一律重嵌、不搬舊向量**(嵌入器一致性鐵則)。
     來源可以是 JSONL 路徑(`import_jsonl`)或 canonical 真相層(`cie.rebuild`)。
@@ -59,7 +62,7 @@ def import_records(records: List[Record], store) -> int:
     """
     # dict 同 key 後賦值覆寫、保留首次出現位置 → 每個 id 取「最後一筆」、順序穩定。
     deduped = list({r.id: r for r in records}.values())
-    return store.upsert_many(deduped)
+    return store.upsert_many(deduped, skip_errors=skip_errors)
 
 
 def import_jsonl(path: PathLike, store) -> int:

@@ -85,7 +85,7 @@ class StoreBackend(Protocol):
     """所有向量庫後端的共同介面(鴨子型別,可插拔)。"""
     model_id: str
     def upsert(self, record: Record) -> str: ...
-    def upsert_many(self, records: List[Record]) -> int: ...
+    def upsert_many(self, records: List[Record], skip_errors: bool = False) -> int: ...
     def search(self, query_text: str, mechanism: BrewMechanism, top_k: int = 20,
                process: Optional[str] = None, roast_band: Optional[str] = None,
                exclude_predictions: bool = True,
@@ -146,19 +146,53 @@ class VectorStore:
         )
         return record.id
 
-    def upsert_many(self, records: List[Record]) -> int:
+    def upsert_many(self, records: List[Record], skip_errors: bool = False) -> int:
         # 契約:呼叫端須先對 id 去重(見 portability.import_records)。本法不保證 batch 內
         # 同 id 的勝出者——避免依賴後端 batch upsert 的隱性語意(換後端不致靜默回退)。
+        # 全有全無:整批一次 upsert。`skip_errors=True`(僅冷啟動 prime 傳)時,批次失敗後**降級
+        # 逐筆隔離**——壞記錄 log WARNING + skip、好記錄照進,避免單一壞記錄讓整個 serving 索引
+        # 歸零(PR6:防「靜默空 index」)。預設 False:正常寫入(member log_calibration)仍 fail loud。
         qm = self._qm
         if not records:
             return 0
-        vecs = self.embedder.embed_batch([r.build_embedding_text() for r in records])
-        points = [
-            qm.PointStruct(id=point_id(r.id), vector=v, payload=self._payload(r))
-            for r, v in zip(records, vecs)
-        ]
-        self.client.upsert(collection_name=self.collection, points=points)
-        return len(points)
+        try:
+            vecs = self.embedder.embed_batch([r.build_embedding_text() for r in records])
+            points = [
+                qm.PointStruct(id=point_id(r.id), vector=v, payload=self._payload(r))
+                for r, v in zip(records, vecs)
+            ]
+            self.client.upsert(collection_name=self.collection, points=points)
+            return len(points)
+        except Exception:
+            if not skip_errors:
+                raise
+            return self._upsert_isolated(records)
+
+    def _upsert_isolated(self, records: List[Record]) -> int:
+        """批次 upsert 失敗後的最後手段:逐筆重嵌 + upsert,隔離壞記錄。回傳成功載入筆數。
+
+        紀律(PR6):skip 是 last resort、**絕不靜默**——每筆失敗都 log WARNING(印 id + 原因),
+        並在結尾彙總 (loaded, skipped)。跳掉幾筆的後果由冷啟動完整性門檻(prime 的 assert)把關。
+        """
+        qm = self._qm
+        loaded = skipped = 0
+        for r in records:
+            try:
+                vec = self.embedder.embed(r.build_embedding_text())
+                self.client.upsert(
+                    collection_name=self.collection,
+                    points=[qm.PointStruct(id=point_id(r.id), vector=vec,
+                                           payload=self._payload(r))],
+                )
+                loaded += 1
+            except Exception as e:
+                skipped += 1
+                logger.warning("upsert 跳過壞記錄 id=%s:%s", getattr(r, "id", "?"), e)
+        if skipped:
+            logger.warning(
+                "upsert_many 逐筆隔離:載入 %d、跳過 %d(批次 upsert 曾失敗,skip_errors=True)。",
+                loaded, skipped)
+        return loaded
 
     # ── 檢索:機制硬過濾 + 語意召回 ──
     def search(
@@ -301,7 +335,7 @@ class VectorizeStore:
         self.upsert_many([record])
         return record.id
 
-    def upsert_many(self, records: List[Record]) -> int:
+    def upsert_many(self, records: List[Record], skip_errors: bool = False) -> int:
         if not records:
             return 0
         vecs = self.embedder.embed_batch([r.build_embedding_text() for r in records])
@@ -309,9 +343,17 @@ class VectorizeStore:
             {"id": r.id, "values": v, "metadata": _sanitize_metadata(record_to_payload(r))}
             for r, v in zip(records, vecs)
         ]
+        loaded = 0
         for i in range(0, len(lines), self._UPSERT_BATCH):
-            self.client.vectorize_upsert(self.index, lines[i:i + self._UPSERT_BATCH])
-        return len(lines)
+            chunk = lines[i:i + self._UPSERT_BATCH]
+            try:
+                self.client.vectorize_upsert(self.index, chunk)
+                loaded += len(chunk)
+            except Exception as e:
+                if not skip_errors:  # 預設 fail loud;skip_errors=True(冷啟動)才隔離壞批次
+                    raise
+                logger.warning("Vectorize upsert 跳過批次 %d 筆:%s", len(chunk), e)
+        return loaded
 
     # ── 檢索:機制硬過濾 + 語意召回 ──
     def search(

@@ -54,6 +54,15 @@ def test_health_public_no_auth(client):
     assert body["auth_configured"] is True
 
 
+def test_health_reports_serving_and_canonical_counts(client):
+    """PR6:/health 永遠回報 serving 索引筆數(+ 冷啟動 canonical 基準),讓「空 / 短缺索引」可見。"""
+    body = client.get("/health").json()
+    assert "serving_index_count" in body and "canonical_count" in body
+    assert body["serving_index_count"] >= 1          # 離線開發 auto_seed 灌了冷啟動種子
+    # 離線開發(memory + 本地 canonical)不 prime → canonical_count 為 None(非外部共用真相)。
+    assert body["canonical_count"] is None
+
+
 def test_root_public_no_auth(client):
     r = client.get("/")
     assert r.status_code == 200

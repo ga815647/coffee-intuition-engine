@@ -24,7 +24,7 @@ from mcp.server.fastmcp import FastMCP
 
 from cie.engine import Engine
 from cie.mcp_tools import register_tools
-from cie.rebuild import prime_serving_index
+from cie.rebuild import ServingIndexIntegrityError, prime_serving_index
 from cie.seed import seed as seed_store
 
 mcp = FastMCP("coffee-intuition-engine")
@@ -32,14 +32,18 @@ _engine = Engine()
 # owner 門:掛全部工具(讀 + 寫 + 晉升)。include_promotion=True 只在 stdio,網路面不掛。
 register_tools(mcp, _engine, include_writes=True, include_promotion=True)
 
-# 啟動載入:生產(memory + R2)從共用 canonical 重建 in-memory 索引(owner 讀得到 global
-# 全量、可審查晉升,本機寫 global 下次 Cloud Run 冷啟動讀得到);離線開發無 R2 → 庫空時
-# 灌 6 筆冷啟動種子(正式載入走 cie.bootstrap + cie.rebuild)。
+# 啟動載入:生產(memory + D1/R2)從共用 canonical 重建 in-memory 索引(owner 讀得到 global
+# 全量、可審查晉升,本機寫 global 下次 Cloud Run 冷啟動讀得到);離線開發無外部 canonical →
+# 庫空時灌 6 筆冷啟動種子(正式載入走 cie.bootstrap + cie.rebuild)。
+# PR6:serving 索引完整性不足 → fail-closed(raise),owner 本機也不在殘缺索引下靜默起來。
 try:
-    if prime_serving_index(_engine) is None and _engine.store.count() == 0:
-        seed_store(_engine.store)
-except Exception:  # pragma: no cover
-    pass
+    primed = prime_serving_index(_engine)
+except ServingIndexIntegrityError:
+    raise
+except Exception:  # pragma: no cover - 其他重建失敗退回種子路徑
+    primed = None
+if primed is None and _engine.store.count() == 0:
+    seed_store(_engine.store)
 
 
 if __name__ == "__main__":
