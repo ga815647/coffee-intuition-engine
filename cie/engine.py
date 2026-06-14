@@ -94,13 +94,38 @@ class Engine:
     def diagnose(self, mechanism: BrewMechanism, defect: str,
                  bean: Optional[BeanRoast] = None) -> dict:
         tips = physics.diagnose_prior(mechanism, defect)
-        return {
+        out: dict = {
             "mode": "diagnose",
             "mechanism": mechanism.value,
             "defect": defect,
             "suggested_adjustments": tips,
             "warnings": ["先驗層建議;記錄 TDS/EY 與校準後可加入經驗修正。"],
         }
+        # 偏酸:已知爭議 → 兩方向並陳 + 寬區間 + 低信心 + 閉環 A/B 旗標(不選邊;§3/§12.2 同型處置)。
+        contested = physics.contested_diagnosis(mechanism, defect)
+        if contested is None:
+            out["contested"] = False
+            return out
+        out["contested"] = True
+        out["contested_topic"] = contested["topic"]
+        out["open_question"] = contested["question"]
+        out["confidence_flag"] = contested["confidence"]            # "low":誠實寬區間
+        out["interval_note"] = contested["interval_note"]
+        out["directions"] = contested["directions"]                # working_prior + second_signal(B)
+        out["second_signal"] = contested["directions"][1]          # 明示 Cotter B 級第二訊號
+        out["needs_ab_test"] = contested["needs_ab_test"]          # 閉環 A/B 旗標(舌頭裁決)
+        out["resolution"] = contested["resolution"]                # A 級保留給使用者 A/B
+        # warnings 前置爭議旗標:**一定轉達**,別只報單一方向(對齊 SKILL.md)。
+        out["warnings"] = [
+            "⚠️ 偏酸的 fix 方向是【已知爭議】:兩個先驗分歧、未定論——別只報一個方向。",
+            "working prior=增萃降酸(convergent + 物理先驗);second signal=拆濃度/萃取軸:"
+            "降 TDS(濃度)才是降酸最穩的一手,『一味增萃』在 drip 常同時升 TDS、可能反升酸"
+            "(UC Davis B 級,單源/drip 限定,不覆蓋)。",
+            contested["interval_note"],
+            contested["note"],
+            f"請跑閉環 A/B 由你的舌頭裁決 → {contested['needs_ab_test']}",
+        ] + out["warnings"]
+        return out
 
     # ── 換泡法 ──
     def method_swap(self, bean: BeanRoast, from_params: BrewParams,

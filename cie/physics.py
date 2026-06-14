@@ -111,3 +111,107 @@ def diagnose_prior(mechanism: BrewMechanism, defect: str) -> list[str]:
 def golden_cup_target(mechanism: BrewMechanism) -> dict:
     p = PRIORS[mechanism]
     return {"target_ey": p.target_ey, "target_tds": p.target_tds, "note": p.note}
+
+
+# ────────────────────────────── 偏酸 fix 方向:已知爭議 ──────────────────────────────
+# 鐵則:這裡**不選邊**。傳統「酸=萃取不足→增萃(磨細/升溫/延長)」是 working prior
+# (跨來源 convergent + 三軌物理先驗);UC Davis Coffee Center 感官研究(Frost / Batali /
+# Cotter / Ristenpart / Guinard)提出的「第二訊號」其實要**把濃度軸與萃取軸拆開看**——
+# 這是本議題最常被混為一談、也最關鍵的一刀:
+#   • 穩健那一半 = **濃度(TDS)軸**:知覺酸度主要由濃度驅動;可滴定酸度(sour 的化學基礎)
+#     與 TDS **線性正相關**、與 EY(萃取率/PE)**幾乎無關**;知覺 sour 追隨可滴定酸度而非 pH。
+#     ⇒ 加水/降 TDS 會**真的降低知覺酸度**(全因子 RSM 中 sour 是所有描述項裡擺幅最大的,
+#     高 TDS/低 EY 角最酸、低 TDS/高 EY 角最不酸,~20 分/百分制)。
+#   • 被誤掛、較弱那一半 = 「**多萃(↑EY)就降酸**」:在 drip,提高 EY 其實讓 sour **微降**
+#     (與傳統同向但弱),但這常被誤講成反向。真正的陷阱是:percolation 裡「磨細/升溫/延長」
+#     會**同時拉高 EY 與 TDS**——EY↑ 弱降酸、TDS↑ 升酸,兩者方向相反、淨效不定,故「一味增萃」
+#     不保證降酸,甚至可能因濃度上升而更酸。且 EY→酸度的**符號隨機制翻面**(drip:EY↑ 降 sour;
+#     immersion:延長萃取反而升酸)——正是機制三軌硬隔離為何必要。
+# 證據量級:UC Davis 跨 4+ 篇同行評審、內部高度一致、附開放資料(Dryad),遠強過社群口耳(C);
+# 但仍是**單一實驗室/單一受訓 panel(~12 人)/drip 限定/特定豆焙與區間/無第三方獨立複現**,
+# 且不可外推到 immersion/pressure → **B 級第二訊號**,非可外推的 A 級定律,**不覆蓋** working
+# prior;grade 只影響第二訊號權重,不改「爭議 + 待 A/B」的結論。唯一 A 級裁決 = 使用者自己的
+# 閉環 A/B(具 protocol 的閉環真值,如 SCA_cupping)。對齊前車之鑑:convergent 共識不等於對
+# (系統打臉過「鎂=明亮」),但單一來源也不得翻 CIE——故維持 open。詳見 DESIGN §3 / §12.2。
+
+# 第二訊號的來源標記(與 Phase 3 寫入 D1 的 global 知識條目共用,確保 code 與 data 一致)。
+CONTESTED_ACIDITY_GRADE = "B"
+CONTESTED_ACIDITY_PROTOCOL = "study:UCDavis_CoffeeCenter_TDS_vs_EY_drip_sensory"
+CONTESTED_ACIDITY_SOURCE = (
+    "UC Davis Coffee Center / Coffee Science Foundation drip 感官研究(Frost / Batali / "
+    "Cotter / Ristenpart / Guinard)。主證:Batali et al. 2021,『Titratable Acidity, "
+    "Perceived Sourness, and Liking of Acidity in Drip Brewed Coffee』,ACS Food Sci. "
+    "Technol. 1(4):559-569,doi:10.1021/acsfoodscitech.0c00078(知覺酸度隨 TDS、可滴定酸度與 "
+    "TDS 線性而與 EY 無關);反應曲面:Batali et al. 2020,Sci. Reports 10:16450,"
+    "doi:10.1038/s41598-020-73341-4(sour 擺幅最大,高 TDS/低 EY 最酸);消費者資料集:"
+    "Dryad doi:10.25338/B8993H。限定:單一實驗室、drip、無獨立複現 → B 級,不可跨機制外推。"
+)
+
+# 偏酸缺陷關鍵詞(只對『酸』類觸發爭議旗標;水感/薄不在此議題)。
+SOUR_DEFECT_KEYS = ("酸", "sour", "acid", "尖")
+
+
+def _sour_ab_test(mechanism: BrewMechanism) -> str:
+    """機制相應的閉環 A/B:同豆兩杯,一杯往增萃、一杯往降濃度,盲喝比酸度,舌頭裁決。"""
+    if mechanism == BrewMechanism.IMMERSION:
+        return ("閉環 A/B(同豆同批):A 杯延長浸泡 / 提高粉水比(增萃方向);"
+                "B 杯沖完加水稀釋一成(降濃度方向)。盲喝比酸度,以你的舌頭裁決哪邊降酸。")
+    if mechanism == BrewMechanism.PRESSURE:
+        return ("閉環 A/B(同豆):A 杯磨細 / 拉長萃取(增萃方向,留意通道效應);"
+                "B 杯萃取後加水稀釋成 Americano(降濃度方向)。盲喝比酸度。")
+    return ("閉環 A/B(同豆同批):A 杯磨細一階(增萃方向);"
+            "B 杯維持研磨、沖完加水稀釋一成(降濃度方向)。盲喝比酸度,以你的舌頭裁決。")
+
+
+def contested_diagnosis(mechanism: BrewMechanism, defect: str) -> dict | None:
+    """偏酸 → 回傳『兩方向並陳 + 寬區間 + 低信心 + 閉環 A/B 旗標』的爭議結構;非偏酸回 None。
+
+    刻意**不選邊**:working prior(增萃)與 second signal(降濃度,Cotter B 級)並列,
+    結論維持 open(待使用者閉環 A/B)。回傳 JSON-ready dict,供 engine.diagnose 直接掛上、
+    經 MCP 原樣輸出。
+    """
+    d = (defect or "").lower()
+    if not any(k in d for k in SOUR_DEFECT_KEYS):
+        return None
+    working_adjustments = diagnose_prior(mechanism, defect)  # 既有增萃方向 = working prior
+    return {
+        "topic": "偏酸的 fix 方向",
+        "question": ("偏酸該往『增萃(磨細/升溫/延長)』還是『降濃度(加水/降 TDS)』?"
+                     "兩個先驗分歧、未定論,系統不替你選邊。"),
+        "directions": [
+            {
+                "stance": "working_prior",
+                "direction": "增萃降酸:把酸視為萃取不足,往增萃方向走(磨細/升溫/延長接觸/提高粉水比)。",
+                "adjustments": working_adjustments,
+                "grade": "working_prior",
+                "basis": ("跨來源 convergent(SCA 沖煮控制表、主流 barista 教學、風味矩陣、"
+                          "舊版 Aiden、一般常識)+ 三軌物理先驗;作為起手 working prior。"),
+            },
+            {
+                "stance": "second_signal",
+                "direction": ("拆開濃度軸與萃取軸看(本議題關鍵):①【穩健】降濃度降酸——加水 / 降"
+                              " TDS 會真的降低知覺酸度(知覺 sour 追隨可滴定酸度,後者與 TDS 線性、"
+                              "與 EY 幾乎無關)。②【較弱/常被誤掛】『多萃就降酸』不可靠——drip 提高"
+                              " EY 只讓酸**微降**;且 percolation 裡『磨細/升溫/延長』會同時拉高 EY"
+                              "(弱降酸)與 TDS(升酸),兩者反向、淨效不定,一味增萃不保證降酸、"
+                              "甚至可能因濃度上升而更酸。EY→酸度符號還隨機制翻面(immersion 相反)。"),
+                "adjustments": ["先判斷是『濃度(TDS)』還是『萃取(EY)』在主導酸感,再決定方向",
+                                "想降酸最穩的一手:沖完加水 / 降低沖煮濃度(↓TDS)",
+                                "別預設『一味增萃就會降酸』——增萃常同時升 TDS,可能反而更酸"],
+                "grade": CONTESTED_ACIDITY_GRADE,  # B:第二訊號,不覆蓋 working prior
+                "basis": ("UC Davis Coffee Center drip 感官研究——把濃度(TDS)軸與萃取(EY)軸分離:"
+                          "知覺酸度主要由 TDS 驅動、與 EY 關係弱(且隨機制變號)。單一實驗室、drip 限定、"
+                          "特定豆/焙/族群/區間的描述性感官迴歸、無獨立複現 → B 級第二訊號,非可外推的"
+                          " A 級定律;不覆蓋 working prior,亦不可跨機制外推。"),
+                "protocol": CONTESTED_ACIDITY_PROTOCOL,
+                "source": CONTESTED_ACIDITY_SOURCE,
+            },
+        ],
+        "confidence": "low",
+        "interval_note": "此議題證據分歧:視為寬區間 / 低信心 open question,不給單一有把握方向。",
+        "needs_ab_test": _sour_ab_test(mechanism),
+        "resolution": ("唯一 A 級裁決 = 你自己的閉環 A/B 結果(先進 self;跨人成立才晉升 global)。"
+                       "在你給出閉環真值前,系統維持『兩方向並陳 + 寬區間 + 低信心』的 open 狀態。"),
+        "note": ("鐵則:單一來源(含 Cotter)不得翻 CIE;convergent 傳統共識也不等於對"
+                 "(參『鎂=明亮』前車之鑑)。故維持 open,等你的舌頭裁決。"),
+    }

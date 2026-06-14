@@ -421,6 +421,25 @@
 - **鐵則(防偽因果)**:系統**不得**把「鎂→明亮」這類通俗水-風味因果寫死進映射。水對風味的因果證據互斥且未定論,故水欄位只作**分群/控制變數**,不進風味方向投票。若要研究水,開獨立「水實驗」維度,一次只動水。
 - 「分析測得的酸含量」≠「杯中風味」(陽離子螯合會干擾儀器讀數)——延續鐵則:數值非真值。
 
+#### 12.2.1 第二個重大科學爭議:偏酸的 fix 方向(TDS vs EY)— ✅ 已落地
+
+與「鎂=明亮」同型的處置:**系統不選邊,誠實呈現「兩個 prior 在吵、待使用者閉環 A/B」的 open 狀態。**
+
+**爭議內容:**
+- **working prior(傳統)**:「酸=萃取不足→增萃(磨細/升溫/延長)」。跨來源 convergent(SCA 沖煮控制表、主流 barista 教學、風味矩陣、舊版 Aiden、常識)+ 三軌物理先驗。作為起手 working prior。
+- **第二訊號(UC Davis Coffee Center drip 感官研究)**:把**濃度(TDS)軸與萃取(EY/PE)軸拆開**——這是本議題最常被混為一談、也最關鍵的一刀。
+  - **穩健那一半 = 濃度軸**:知覺酸度**主要由濃度(TDS)驅動**;可滴定酸度(sour 的化學基礎)與 TDS **線性正相關、與 EY 幾乎無關**;知覺 sour 追隨可滴定酸度而非 pH。⇒ 加水/降 TDS 會**真的降低知覺酸度**(全因子 RSM 中 sour 擺幅最大,高 TDS/低 EY 角最酸)。〔高信心(within-lab)〕
+  - **被誤掛、較弱那一半 = 「多萃(↑EY)就降酸」**:drip 提高 EY 只讓 sour **微降**(與傳統同向但弱);真正陷阱是 percolation「磨細/升溫/延長」會**同時拉高 EY 與 TDS**——EY↑ 弱降酸、TDS↑ 升酸,方向相反、淨效不定,故「一味增萃」不保證降酸、甚至可能因濃度上升而更酸。且 **EY→酸度的符號隨機制翻面**(immersion 延長萃取反而升酸)——正是機制三軌硬隔離為何必要。
+
+**分級(依 CIE rubric,獨立對抗式裁定):Grade B。** 理由四條:(1) 單一實驗室/單一受訓 panel(~12 人)、無第三方獨立複現(findings 自陳);(2) 限定一支中焙水洗 Honduran、TDS 1.0–1.5%、PE 16–24%、drip、加州大學生消費者;(3) percolation 限定,UC Davis 自家 immersion 研究 PE 符號翻面,當普世定律會破機制隔離鐵則;(4) 結構上不帶逐豆 SCA_cupping `protocol`,`engine.log_calibration` 本來就會以 A 級拒收。→ 它**遠強過社群口耳(C)**,但**非可外推的 A 級定律**;A 級保留給**使用者自己**對特定豆+焙+機制的閉環 A/B(`protocol=SCA_cupping`)。
+
+**設計修訂(最小、最乾淨):**
+- `physics.contested_diagnosis(mechanism, defect)`:偏酸關鍵詞觸發 → 回傳「兩方向並陳 + 寬區間 + 低信心 + 機制相應閉環 A/B 旗標」的爭議結構;非偏酸回 `None`。`CONTESTED_ACIDITY_*` 常數(grade=B / protocol / source)為 code 與 data 共用真相。
+- `engine.diagnose` 掛上 `contested=True` + `directions`(working_prior + second_signal)+ `second_signal` + `needs_ab_test` + `resolution`,並**前置爭議 warnings**(別只報單一方向)。`suggested_adjustments` 保留 working prior 增萃方向(向後相容)。
+- **鐵則對齊**:grade 只影響第二訊號**權重**,不改「爭議 + 待 A/B」的結論。單一來源(含 Cotter)不得翻 CIE;convergent 傳統共識也不等於對(參『鎂=明亮』前車之鑑)。故維持 open,等使用者舌頭裁決。
+- **owner curation(Phase 3)**:`tools/seed_contested_acidity.py` 把同一份第二訊號寫成 **global / grade=B / percolation** 知識條目(數值風味軸全 None,不污染 predict;只作 evidence 鄰居 + 審計痕跡),經 `cie.snapshot` 匯出回 git 可回溯。
+- 測試:`tests/test_smoke.py::test_diagnose_sour_is_contested` / `test_diagnose_bitter_not_contested` / `test_diagnose_immersion_sour_contested_ab_is_mechanism_aware`。
+
 ### 12.3 信心區間改用 Conformal Prediction(確認 AUDIT A8 成立)
 
 **已驗證事實:**

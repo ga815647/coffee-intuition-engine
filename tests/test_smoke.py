@@ -52,6 +52,43 @@ def test_diagnose(engine):
     assert any("細" in t or "溫" in t or "時間" in t for t in out["suggested_adjustments"])
 
 
+def test_diagnose_sour_is_contested(engine):
+    """偏酸 = 已知爭議:兩方向並陳 + 寬區間/低信心 + 閉環 A/B 旗標,不選邊(不只報增萃)。"""
+    out = engine.diagnose(BrewMechanism.PERCOLATION, "偏酸、尖")
+    assert out["contested"] is True
+    # 仍保留 working prior 的增萃方向(向後相容、不刪 working prior)
+    assert any("細" in t or "溫" in t or "時間" in t for t in out["suggested_adjustments"])
+    # 兩個方向都列:working_prior(增萃)+ second_signal(降濃度)
+    stances = {d["stance"] for d in out["directions"]}
+    assert stances == {"working_prior", "second_signal"}
+    # Cotter 以 B 級第二訊號進場,不覆蓋
+    assert out["second_signal"]["grade"] == "B"
+    assert out["second_signal"]["stance"] == "second_signal"
+    assert "doi:10.25338/B8993H" in out["second_signal"]["source"]
+    # 誠實寬區間 / 低信心 + 閉環 A/B 旗標 + A 級保留給使用者 A/B
+    assert out["confidence_flag"] == "low"
+    assert "A/B" in out["needs_ab_test"]
+    assert "self" in out["resolution"]
+    # warnings 一定轉達爭議,且不只一個方向
+    assert any("爭議" in w for w in out["warnings"])
+
+
+def test_diagnose_bitter_not_contested(engine):
+    """苦/澀不是爭議議題:走單一 working prior(降萃),不掛爭議結構。"""
+    out = engine.diagnose(BrewMechanism.PERCOLATION, "苦、乾澀")
+    assert out["contested"] is False
+    assert "directions" not in out
+    assert "needs_ab_test" not in out
+    assert any("粗" in t or "降" in t or "縮" in t for t in out["suggested_adjustments"])
+
+
+def test_diagnose_immersion_sour_contested_ab_is_mechanism_aware(engine):
+    """浸泡偏酸:仍爭議,但 A/B 旗標走機制相應(浸泡時間/粉水比,而非『磨細』)。"""
+    out = engine.diagnose(BrewMechanism.IMMERSION, "太酸")
+    assert out["contested"] is True
+    assert "浸泡" in out["needs_ab_test"] or "粉水比" in out["needs_ab_test"]
+
+
 def test_method_swap_cross_mechanism_high_uncertainty(engine):
     bean = BeanRoast(origin="Ethiopia", process=Process.WASHED, roast_agtron=74)
     out = engine.method_swap(bean, BrewParams(brew_mechanism=BrewMechanism.PERCOLATION),
