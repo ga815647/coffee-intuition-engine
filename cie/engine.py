@@ -96,10 +96,15 @@ class Engine:
     def predict(self, bean: BeanRoast, params: BrewParams,
                 user_ids: Optional[List[str]] = None) -> dict:
         hits = self._recall(bean, params.brew_mechanism, FlavorProfile(), user_ids=user_ids)
-        ratio, flag, warnings = assess(hits)
         # 風味「這隻豆的特色」只信同豆(§3.2):predicted_flavor 只吃 bean_match=True 鄰居;
         # 跨豆(含 A/B)與 C 的風味降級進 social_tendency,永不寫進 predicted_flavor 特色。
         same_bean = self._same_bean(bean, hits)
+        # PR5:predict 的 grounding = 同豆子集,故**信心 / n_eff floor / a_weight_ratio 與 evidence
+        # 全算同豆子集**(`assess(same_bean)`),而非整個召回池——否則熱門產地的大召回池會給單錨點
+        # 假信心(live 實測:同豆 n_eff<1 卻因 24 筆大池被 count 旗標報 medium,自相矛盾於 PR4 的
+        # n_eff<1→low)。空同豆 → assess([]) → low(維持「無同豆校準」現行為)。跨豆參考不失:仍由
+        # social_tendency(survey 全池)呈現。recommend/diagnose 不變(大方向本就借全鄰居)。
+        ratio, flag, warnings = assess(same_bean)
         flavor: Dict[str, dict] = {}
         flavor_warnings: List[str] = []
         if same_bean:
@@ -124,7 +129,9 @@ class Engine:
             "extraction_prior": extraction,
             "confidence_flag": flag,
             "a_weight_ratio": ratio,
-            "evidence": self._evidence(hits),
+            # PR5 Item 2:evidence = 真正餵 predicted_flavor 的同豆子集(全池 evidence 會印跨豆、
+            # 與實際 grounding 矛盾)。跨豆/社群參考改看 social_tendency.origins/varieties。
+            "evidence": self._evidence(same_bean),
             "warnings": warnings + flavor_warnings + self._sparse_warning(hits)
                        + ["定位:方向/排序可信度 > 絕對數值(R² 天花板 ~0.5)。"],
         }

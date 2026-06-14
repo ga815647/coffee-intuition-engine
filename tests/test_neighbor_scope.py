@@ -248,8 +248,10 @@ def test_assess_sufficient_effective_weight_keeps_medium():
     assert not any("有效樣本過小" in w for w in warnings)
 
 
-def test_predict_low_effective_weight_forces_low_confidence(store):
-    """肯亞日曬 predict 只撈到 2 筆跨產地 C 鄰居(有效權重趨零)→ low(非 count 給的 medium)。"""
+def test_predict_empty_same_bean_low_and_evidence_excludes_cross_bean(store):
+    """PR5:肯亞日曬 predict 只撈到 2 筆跨產地 C(無同豆)→ assess([]) → low;且
+    evidence **不列跨豆**(Item 2),跨豆參考改由 social_tendency 呈現(Item 1 信心 + Item 2
+    evidence 都以同豆子集為準)。"""
     recs = [_rec("Brazil Cerrado", "Catuai", grade=Grade.C, process=Process.NATURAL, acidity=4.0),
             _rec("Colombia Huila", "Caturra", grade=Grade.C, process=Process.NATURAL, acidity=5.0)]
     eng = _engine(store, recs)
@@ -258,5 +260,46 @@ def test_predict_low_effective_weight_forces_low_confidence(store):
     params = BrewParams(brew_mechanism=BrewMechanism.PERCOLATION, water_temp_c=92.0,
                         brew_ratio=15.0, grind_um=300.0, tds_pct=1.35, ey_pct=20.0)
     out = eng.predict(kenya, params)
-    assert out["confidence_flag"] == "low"                       # 2 鄰居本會 medium,eff<1 壓回
-    assert any("有效樣本過小" in w for w in out["warnings"])
+    assert out["confidence_flag"] == "low"                       # 空同豆 → assess([]) → low
+    assert any("無同豆校準" in w for w in out["warnings"])       # 維持「無同豆校準」現行為
+    assert out["evidence"] == []                                 # Item 2:evidence 不列跨豆
+    st = out["social_tendency"]                                  # 跨豆參考仍由 social_tendency 呈現
+    assert st is not None and st["bean_match_any"] is False
+    assert "Brazil Cerrado" in st["origins"] and "Colombia Huila" in st["origins"]
+
+
+def test_predict_confidence_and_evidence_reflect_same_bean_subset(store):
+    """PR5(核心):predict 的信心 / n_eff floor / evidence 算**同豆子集**,非整個召回池。
+
+    受控池 = 2 同豆 C(Σ權重<1)+ 5 跨豆 B(撐起全池);全池 assess→medium(PR5 前的脫鉤
+    假信心),但真正餵 predicted_flavor 的只有 2 同豆 C(n_eff<1)→ predict 應誠實報 low,
+    且 evidence 只列那 2 筆同豆(不印跨豆 B)。predicted_flavor 內容不變(仍由同豆 C 餵)。
+    """
+    eng = Engine(store)  # memory store → canonical=None,不碰 D1
+
+    def _ph(i: int, grade: str, origin: str, variety: str, score: float,
+            conf: float, acidity: float) -> dict:
+        return {"id": f"h{i}",
+                "payload": {"grade": grade, "origin": origin, "variety": variety,
+                            "process": "washed", "confidence": conf,
+                            "flavor_acidity": acidity},
+                "score": score}
+
+    same = [_ph(i, "C", "Ethiopia Yirgacheffe", "Geisha", 0.95, 0.6, 6.5) for i in range(2)]
+    cross = [_ph(10 + i, "B", "Panama", "Geisha", 0.8, 1.0, 8.0) for i in range(5)]
+    pool = same + cross                                          # 已依分數序(C 高分在前無妨)
+    eng.store.search = lambda **kw: pool                         # 受控召回池
+
+    bean = _yirg_geisha()
+    # 對照:全池 assess 會給 medium(PR5 前 predict 算錯集合的脫鉤答案)
+    assert assess(eng._recall(bean, BrewMechanism.PERCOLATION, FlavorProfile()))[1] == "medium"
+
+    out = eng.predict(bean, _perc_params())
+    assert out["confidence_flag"] == "low"                       # 同豆子集 n_eff<1 → 強制 low
+    assert any("有效樣本過小" in w for w in out["warnings"])      # PR4 floor 經同豆子集仍生效
+    # predicted_flavor 內容不變:仍由同豆 C 餵(非物理 prior),且取同豆值非跨豆 8.0
+    assert out["predicted_flavor"]["acidity"]["source"] != "prior"
+    assert out["predicted_flavor"]["acidity"]["value"] == 6.5
+    # Item 2:evidence 只列同豆那 2 筆(不印跨豆 B)
+    assert {e["id"] for e in out["evidence"]} == {"h0", "h1"}
+    assert all(e["origin"] == "Ethiopia Yirgacheffe" for e in out["evidence"])
