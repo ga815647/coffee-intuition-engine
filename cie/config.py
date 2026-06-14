@@ -81,6 +81,10 @@ class Config:
     # 擋掉雲端 Host → 421**;故公開部署須顯式關閉(見 server_http._transport_security)。
     # 綁定固定自有網域時可填(如 "cie.example.com,cie.example.com:*")硬化。
     mcp_allowed_hosts: str = ""
+    # 公開服務 base URL(含 scheme,不含 /mcp),如 https://cie-mcp-xxx.run.app。
+    # 純展示用:tools/add_guest 用它組可分享連接器 URL(`<public_url>/mcp?token=<token>`);
+    # 留空 → add_guest 提示填入。不影響伺服器行為(伺服器綁 host/port,非此值)。
+    public_url: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -115,6 +119,7 @@ class Config:
             mcp_port=int(_get("CIE_MCP_PORT") or _get("PORT") or "8000"),
             mcp_stateless=_get("CIE_MCP_STATELESS", "1").lower() not in ("0", "false", "no", ""),
             mcp_allowed_hosts=_get("CIE_MCP_ALLOWED_HOSTS"),
+            public_url=_get("CIE_PUBLIC_URL"),
         )
 
     # ── 衍生判斷 ──
