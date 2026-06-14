@@ -143,3 +143,32 @@ def test_graded_recall_keeps_same_bean_ab(store):
     same = eng._same_bean(bean, hits)
     assert len(same) >= 1                                        # 同豆 B 仍在召回內
     assert any(h["payload"].get("grade") == "B" for h in same)   # 且確為 A/B
+
+
+def test_graded_recall_rescues_low_score_same_bean_ab(store):
+    """分級召回 **load-bearing**:同豆 A/B 即便相似度分數**低於** top_k 名 C,仍被救回。
+
+    用**受控召回池**直接驗 stratification 邏輯(不靠雜湊嵌入分數的偶然:上面的功能測試裡
+    同豆 B 其實天生高分、即使不分級也會在 top_k,故證不到分級是必要的)。pool 依分數排序為
+    [5×跨豆 C(高分), 1×同豆 B(最低分)];naive `pool[:top_k]` 會把同豆 B 擠掉,
+    分級召回(`ab[:k] ∪ rest[:k]`)把它救回——這正是大量低訊號 C 擴量時的安全閥。
+    """
+    eng = Engine(store)  # memory store → canonical=None,不碰 D1
+
+    def _hit(i: int, grade: str, origin: str, variety: str, score: float) -> dict:
+        return {"id": f"h{i}",
+                "payload": {"grade": grade, "origin": origin, "variety": variety,
+                            "process": "washed"},
+                "score": score}
+
+    pool = [_hit(i, "C", f"Brazil {i}", "Catuai", 0.9 - i * 0.05) for i in range(5)]
+    pool.append(_hit(99, "B", "Ethiopia Yirgacheffe", "Geisha", 0.05))  # 同豆 B、最低分
+    eng.store.search = lambda **kw: pool                            # 受控池(已依分數排序)
+
+    hits = eng._recall(_yirg_geisha(), BrewMechanism.PERCOLATION, FlavorProfile(), top_k=3)
+    ids = {h["id"] for h in hits}
+    assert "h99" in ids                                            # 同豆 B 被救回
+    assert any(h["payload"]["grade"] == "B" for h in hits)
+    # 證明分級是必要的:純分數 top-3 會排除它(B 分數排第 6)
+    naive_top3 = {h["id"] for h in sorted(pool, key=lambda h: -h["score"])[:3]}
+    assert "h99" not in naive_top3

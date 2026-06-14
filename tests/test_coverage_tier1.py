@@ -92,13 +92,17 @@ def test_hard_stretch_flag_false_when_same_bean_present():
 def test_coverage_report_empty_corpus_all_gaps():
     rep = build_report([])
     op = rep["origin_process"]
-    assert op["covered"] == 0 and op["gaps"] == op["total"] > 0
+    # 空語料:seeded=covered=0,空格=未達共識=全格(誠實兩層皆為 0)
+    assert op["seeded"] == 0 and op["covered"] == 0
+    assert op["seeded_gaps"] == op["total"] > 0
+    assert op["covered_gaps"] == op["total"]
     assert rep["mechanism_anchor"]["anchored"] == 0
     assert rep["mechanism_anchor"]["missing"] == rep["mechanism_anchor"]["total"] > 0
-    assert "Kenya×natural" in rep["gaps"]
-    # ★ 優先缺口浮出且標為未補
+    assert "Kenya×natural" in rep["gaps"]            # 空格清單(0 筆)
+    # ★ 優先缺口浮出且標為未補(空、未 seeded、未 covered)
     pg = rep["priority_gaps"]
     assert pg and pg[0]["cell"] == "Kenya×natural" and pg[0]["total"] == 0
+    assert pg[0]["seeded"] is False and pg[0]["covered"] is False
 
 
 def test_coverage_report_counts_grades_and_anchor():
@@ -119,6 +123,73 @@ def test_coverage_report_counts_grades_and_anchor():
     assert "percolation" not in kn["missing_anchor_mechs"]
     assert "immersion" in kn["missing_anchor_mechs"]
     assert kn["anchored_mechs"] == 1
+
+
+# ──────────── 誠實分級:seeded ≠ covered(PR3 §A)+ 單錨點不假信心(PR3 §B) ────────────
+
+def test_coverage_seeded_not_covered_single_c_anchor():
+    """單一 derived C 單元錨點 → 該格 seeded(有同豆)但 **未 covered**(未達共識品質)。
+
+    共識門檻 §4.1 = ≥1 A/B 同豆 **或** ≥3 C 同豆;一筆泛用 C 原型是 seed、不是 consensus。
+    """
+    rows = [
+        # kenya×natural:單一 C 單元錨點 → seeded 但 ~weak(未達共識)
+        {"bean": {"origin": "Kenya Nyeri", "variety": "", "process": "natural"},
+         "params": {"brew_mechanism": "percolation"}, "grade": "C"},
+        # ethiopia×washed:3 筆 C → 達 ≥3 C 共識門檻 → covered
+        *[{"bean": {"origin": "Ethiopia Yirgacheffe", "variety": "", "process": "washed"},
+           "params": {"brew_mechanism": "percolation"}, "grade": "C"} for _ in range(3)],
+        # colombia×washed:1 筆 B(文獻/協定級)→ covered
+        {"bean": {"origin": "Colombia Huila", "variety": "Caturra", "process": "washed"},
+         "params": {"brew_mechanism": "percolation"}, "grade": "B"},
+    ]
+    rep = build_report(rows)
+    by_cell = {(r["origin_token"], r["process"]): r for r in rep["grid"]}
+
+    kn = by_cell[("kenya", "natural")]
+    assert kn["seeded"] is True and kn["covered"] is False     # 單 C 錨點 = seeded、非 covered
+    assert "Kenya×natural" in rep["weak_cells"]                 # 列在「seeded·未達共識」
+    assert "Kenya×natural" not in rep["gaps"]                   # 不是空格(已有 seed)
+
+    assert by_cell[("ethiopia", "washed")]["covered"] is True   # ≥3 C → covered
+    assert by_cell[("colombia", "washed")]["covered"] is True   # ≥1 B → covered
+
+    # seeded 永遠 ≥ covered;且 covered 誠實 < seeded(本例有 ~weak 格)
+    op = rep["origin_process"]
+    assert op["seeded"] >= op["covered"]
+    assert op["covered"] < op["seeded"]
+
+
+def test_single_c_anchor_predict_confidence_stays_honest():
+    """PR3 §B:只有單一 C 同豆錨點 → predicted_flavor 雖 source=neighbors,信心仍誠實低。
+
+    結構保證:`assess` 的 high 需 A 級權重佔比 ≥ 0.30;全 C(a_total=0)→ ratio=0 → 永不 high。
+    """
+    store = VectorStore()
+    store.upsert(_rec("Ethiopia Yirgacheffe", "", grade=Grade.C))  # 單一 C 單元錨點(variety="")
+    out = Engine(store).predict(_yirg_geisha(), _perc())
+
+    # 同豆錨點把 predicted_flavor 抬離物理 prior(source=neighbors)…
+    assert _is_hard_stretch(out) is False
+    assert out["predicted_flavor"]["acidity"]["source"] == "neighbors"
+    # …但信心**誠實低**:flag 不得 high,且有效樣本數很小
+    assert out["confidence_flag"] != "high"
+    assert out["confidence_flag"] == "low"                       # 僅 1 鄰居 → low
+    assert out["predicted_flavor"]["acidity"]["n_effective"] < 1.0
+    # 稀疏 + A 級權重低警告皆在(誠實轉達不確定)
+    assert any("鄰居過少" in w for w in out["warnings"])
+    assert any("A 級權重佔比低" in w for w in out["warnings"])
+
+
+def test_c_volume_never_yields_high_confidence():
+    """大量 C(同豆單錨點 + 眾多跨豆 C)仍不得 high:C 永不洗出高信心(防假確定)。"""
+    store = VectorStore()
+    store.upsert(_rec("Ethiopia Yirgacheffe", "", grade=Grade.C))   # 同豆單錨點
+    for i in range(20):                                              # 大量跨豆 C
+        store.upsert(_rec(f"Brazil Cerrado {i}", "Catuai", grade=Grade.C))
+    out = Engine(store).predict(_yirg_geisha(), _perc())
+    assert out["confidence_flag"] in ("low", "medium")              # 至多 medium
+    assert out["confidence_flag"] != "high"
 
 
 # ────────────────────────────── seed_tier1 產出性質 ──────────────────────────────

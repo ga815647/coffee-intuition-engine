@@ -820,7 +820,8 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 
 **冷啟動退回(`predict` 無同豆時):** `predicted_flavor` 走 `physics.coarse_flavor_axes`(coarse 0–10、`source="prior"`、**無區間**)+ warning;特色交給 `social_tendency`。此物理退回也讓 eval 對每個 holdout 仍有數值預測(維持方向排序覆蓋)。
 
-**分級召回(§3.1;`engine._recall`):** 先召回較大池(`top_k*3`、≥60),取 `A/B` 各 top_k 與其餘各 top_k 的**聯集**,但**仍依 pool 原生分數序回傳**——只「救援」少數同豆 A/B 不被大量 C 擠出,**不在同分時把 A/B 硬排到 C 前面**(否則 owner 讀證據時 C 自有 self 會被同分 B 擠掉,破 §16.3 多租戶讀可見性)。**不動 `weighted_estimate` 權重 / `assess`。**
+**分級召回(§3.1;`engine._recall`):** 先召回較大池(`top_k*3`、≥60),取 `A/B` 各 top_k 與其餘各 top_k 的**聯集**,但**仍依 pool 原生分數序回傳**——只「救援」少數同豆 A/B 不被大量 C 擠出,**不在同分時把 A/B 硬排到 C 前面**(否則 owner 讀證據時 C 自有 self 會被同分 B 擠掉,破 §16.3 多租戶讀可見性)。**不動 `weighted_estimate` 權重 / `assess`。** 測試:`tests/test_neighbor_scope.py::test_graded_recall_rescues_low_score_same_bean_ab`(**受控池**直接證分級是 load-bearing:同豆 B 分數最低、naive `pool[:k]` 會擠掉它,分級召回救回)。
+> **誠實邊界(救援範圍 = 召回池內):** 分級召回只保護**已進入較大池**(score 排名 ≤ `max(top_k*3,60)`)的同豆 A/B。若某同豆 A/B 因嵌入相似度過低、連較大池都進不了(離線雜湊嵌入下偶發),分級召回**無從救起**——那是**嵌入器召回**的責任(接 bge-m3 語意嵌入後預期大幅緩解),非 stratifier 的職責。此處保證的是「**池內**少數 A/B 不被大量 C 的截斷擠出」,不是「任何 A/B 必然召回」。
 
 ### 16.5 與 Aiden 的整合前置
 
@@ -851,13 +852,20 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 
 **Tier-1 覆蓋報告(`tools/coverage_report.py`,§4.1):** 對常見產地 × 處理法(× 機制)網格,依**來源分級**(A/B/C)計數、標空格(`★` Kenya×natural 等優先缺口),並回報**單元錨點覆蓋率**——某 (origin,process,mechanism) 是否有 `variety=""` 的單元錨點。Tier-1 的定義(產地集/各產地處理法/機制)**直接取自 `tools/seed_tier1.py`**,單一真相不漂移(`tests/test_coverage_tier1.py` 釘住「seed 補的筆數 == 報告的缺錨點數」)。
 
+**誠實兩層分級:`seeded` ≠ `covered`(PR3 §A)。** 報告**不**把「有 seed」叫「已覆蓋」,而分兩個獨立百分比:
+- **seeded** = 該 origin×process 格有 ≥1 筆同豆(任一級)。一筆 derived 泛用 C 單元錨點即達 seeded——它只把該格從「硬湊物理」抬到「有同豆鄰居」。
+- **covered** = **共識品質**門檻(`_is_covered`):≥1 A/B 同豆 **或** ≥3 C 同豆。**單一 derived C 錨點是 seed、不是 consensus 覆蓋**,只算 `~weak`(seeded·未達共識),不計入 covered。
+這道分級是 §16.7 落地的誠實校正:先前把「每格 ≥1 筆」表述為「覆蓋 100%」會高估;真實情況是 **seeded 100% / covered 55%**(見下)。
+
 **Tier-1 缺口填補(`tools/seed_tier1.py`,§4.2–4.3):** 對常見格補 **C 級單元級風味原型**記錄。誠實分級鐵則:
 - 一律 **grade=C**(一般公認的產地×處理法風味原型 = 社群 / 教科書共識,非某一支經量測的批次;C 只壓量級、不定義方向、永不當 holdout)。**A 永遠保留給 owner 閉環真值**,外部料不入 A(§5)。
 - **不抄任何烘豆商的專有杯測詞**(§4.4):`flavor_notes` 用通用描述,`source` 誠實標 `tier1:community origin×process flavor archetype (general knowledge, derived; not a roaster's proprietary notes)`,**不偽造特定 URL**。
 - **`variety=""` 單元錨點(關鍵)**:錨點門檻看「該格有無 `variety=""` 記錄」而非「格全空」。因同豆閘對**雙方都具體且不同**的 variety 判為非同豆(§16.4)——一格內若全是特定品種的批次,彼此不互為同豆、查詢仍硬湊;`variety=""` 錨點對全品種寬鬆放行才真正鋪平該格(同時填全空格 **與** 品種破碎格)。C 級低權重(0.1),既有 A/B 真值主導、不被稀釋。冪等:對同 (origin,process,mechanism) 錨點不重覆寫。
 
 **落地結果(離線雜湊嵌入;`corpus/global.jsonl` 446→537,+91 筆 C 級單元錨點):**
-- **結構錨點覆蓋(嵌入器無關 = 真正的資料缺口)**:origin×process **53%→100%**(缺口 22→0);單元錨點 **8%→100%**(缺 91→0)。**★ Kenya×natural 0 筆 → 三機制全覆蓋**(`predict` 由硬湊物理改為同豆鄰居,evidence 首位即該 Kenya 錨點)。
+- **結構錨點覆蓋(嵌入器無關 = 真正的資料缺口)**:origin×process **seeded 53%→100%**(空格 22→0)、單元錨點 **8%→100%**(缺 91→0)——每個 Tier-1 格現在都有同豆料,硬湊率**結構上界** 92%→0%。**★ Kenya×natural 0 筆 → 三機制全 seeded**(`predict` 由硬湊物理改為同豆鄰居,evidence 首位即該 Kenya 錨點)。
+- **誠實校正(PR3 §A):seeded ≠ covered。** 同一份報告的**共識品質覆蓋**(≥1 A/B 或 ≥3 C)只 **53%→55%**(+1 格跨過 ≥3 C;新增 21 格為 `~weak` = seeded·未達共識)。即 **+91 筆 C 單元錨點把每格從「硬湊物理」抬到「有同豆鄰居」(seeded),但它們是 seed、不是 consensus**;真正的共識品質覆蓋仍待 owner 閉環 A/B 或多筆獨立 C 累積。先前把「seeded 100%」表述為「覆蓋 100%」會高估,此處改述為 **seeded 100% / covered 55%**。
 - **實測硬湊率(離線、受召回限制)**:CV 5-fold **58.3%(189/324)→ 49.7%(161/324)**;分機制 immersion 60%→50%、percolation 50%→41%、pressure 71%→66%。overall MAE 1.088→0.996。
 - **誠實落差說明**:實測硬湊率(49.7%)未貼近結構上界(0%),因 (a) 離線雜湊嵌入**召回不力**——同豆錨點存在卻未進 top-k(真實 bge-m3 語意召回預期大幅改善);(b) 殘留硬湊主要是**結構上正確該硬湊**者:blank-origin 泛用配方(~43,非單豆特色查詢)、多產地義式拼配(`origin` 含 `/`)、`process="other"` 的 pressure 單品;(c) 少數 Tier-1 範圍外的小眾產地(hawaii/china/uganda/taiwan…)。即「Tier-1 常見豆」已鋪平,殘留非未填的 Tier-1 缺口。**離線不下 MAE/硬湊率硬門檻**(承 §15.2)。
-- 測試:`tests/test_coverage_tier1.py`(硬湊率整體/分機制 + 旗標綁真實引擎、coverage 空格/★優先/錨點偵測、seed 全 C/`variety=""`/global/誠實來源 + Kenya×natural 三機制 + 對自身輸出冪等 + 與 coverage 單一真相一致)。
+- **單錨點不假信心(PR3 §B):** seeded 的 C 錨點雖讓 `predict.predicted_flavor.source=neighbors`,但**信心仍誠實低**。`assess` 的 `high` 需 A 級權重佔比 ≥ 30%;單一/眾多 C(`a_total=0`)→ `ratio=0` → **結構上永不 `high`**(僅 1 鄰居→`low`、多 C→至多 `medium`),且 `n_effective` 小、稀疏與 A 級權重低警告皆在。GRADE_WEIGHT 不變。
+- 測試:`tests/test_coverage_tier1.py`(硬湊率整體/分機制 + 旗標綁真實引擎、coverage 空格/★優先/錨點偵測、**seeded≠covered 兩層分級**、**單 C 錨點 predict 信心誠實低 + 大量 C 不洗出 high**、seed 全 C/`variety=""`/global/誠實來源 + Kenya×natural 三機制 + 對自身輸出冪等 + 與 coverage 單一真相一致);分級召回 `tests/test_neighbor_scope.py::test_graded_recall_keeps_same_bean_ab`(大量跨豆 C 不擠掉同豆 A/B)。
