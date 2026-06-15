@@ -117,6 +117,48 @@ def test_same_bean_defines_flavor_and_social_none(store):
     assert out["predicted_flavor"]["acidity"]["source"] != "prior"   # 同豆鄰居,非物理 prior
 
 
+# ─────────────── 冷啟動群組均值先驗(機制分軌;治『硬編 ~5 中點偏低』,§1/§6) ───────────────
+
+def test_coldstart_uses_group_mean_prior_not_flat_midpoint(store):
+    """機制資料足夠時,冷啟動 predicted_flavor 走『經驗群組均值』而非硬編 ~5 中點。
+
+    15 筆跨豆 percolation B(acidity=7.0)→ 機制根層有效權重 > MIN_GROUP_WEIGHT;查一支
+    全新冷門豆(無同豆)→ acidity 應拉到群組均值 ~7,而非物理常數 5.0。source 仍 'prior'、附寬區間。
+    """
+    recs = [_rec(f"Origin{i}", "", grade=Grade.B, acidity=7.0) for i in range(15)]
+    eng = _engine(store, recs)
+    novel = BeanRoast(origin="Narnia", variety="", process=Process.WASHED, roast_agtron=74.0)
+    out = eng.predict(novel, _perc_params())
+
+    pf = out["predicted_flavor"]
+    assert pf["acidity"]["source"] == "prior"                  # 冷啟動仍走先驗(非鄰居)
+    assert 6.0 <= pf["acidity"]["value"] <= 8.0                # 拉到群組均值 ~7,非硬編 5.0
+    assert pf["acidity"]["value"] != 5.0
+    assert pf["acidity"]["lower"] is not None and pf["acidity"]["upper"] is not None  # 誠實寬區間
+    assert any("無同豆校準" in w for w in out["warnings"])
+
+
+def test_coldstart_group_prior_never_crosses_mechanism(store):
+    """§1 鐵則:群組均值先驗永不跨機制平均。
+
+    percolation(acidity=7)與 immersion(acidity=2)各自成軌;查 percolation 冷啟動豆,
+    acidity 應反映 percolation 的 ~7,**不被** immersion 的 2 污染(反之亦然)。
+    """
+    perc = [_rec(f"P{i}", "", grade=Grade.B, acidity=7.0,
+                 mech=BrewMechanism.PERCOLATION) for i in range(15)]
+    imm = [_rec(f"I{i}", "", grade=Grade.B, acidity=2.0,
+                mech=BrewMechanism.IMMERSION) for i in range(15)]
+    eng = _engine(store, perc + imm)
+    novel = BeanRoast(origin="Narnia", variety="", process=Process.WASHED, roast_agtron=74.0)
+
+    perc_out = eng.predict(novel, BrewParams(brew_mechanism=BrewMechanism.PERCOLATION,
+                                             ey_pct=20.0))
+    imm_out = eng.predict(novel, BrewParams(brew_mechanism=BrewMechanism.IMMERSION,
+                                            ey_pct=20.0))
+    assert perc_out["predicted_flavor"]["acidity"]["value"] >= 6.0   # 走 percolation ~7
+    assert imm_out["predicted_flavor"]["acidity"]["value"] <= 4.0    # 走 immersion ~2,未被 7 拉高
+
+
 # ────────────────────────────── params 不分流(借廣鄰居) ──────────────────────────────
 
 def test_params_borrow_cross_bean(store):

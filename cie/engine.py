@@ -10,7 +10,8 @@ from typing import Dict, List, Optional
 from . import physics
 from .canonical import CanonicalStore, maybe_get_canonical
 from .retrieval import (
-    Estimate, RetrievalResult, assess, bean_match, social_tendency, weighted_estimate,
+    Estimate, GroupPrior, RetrievalResult, assess, bean_match, social_tendency,
+    weighted_estimate,
 )
 from .schema import (
     FLAVOR_AXES, BeanRoast, BrewMechanism, BrewParams, FlavorProfile, Grade, Record,
@@ -27,6 +28,22 @@ class Engine:
         # canonical 真相 sink:僅當後端無法自存(Vectorize)時啟用,避免記憶體 /
         # Qdrant 的重複寫與測試副作用。可由呼叫端顯式注入(測試 / R2)。
         self.canonical = canonical if canonical is not None else maybe_get_canonical(self.store)
+        self._gp_cache: Optional[tuple] = None   # (store.count(), GroupPrior);筆數變動即失效重建
+
+    def _group_prior(self) -> Optional[GroupPrior]:
+        """經驗群組均值先驗(機制分軌),由當前 store 記錄建,隨筆數變動失效重建。
+
+        eval 中 holdout 已按內容指紋排除於 store,故此先驗**不洩漏**(與召回庫同源)。
+        後端無 `iter_records`(如 Vectorize)→ None,predict 自動退回硬編物理常數。
+        """
+        if not hasattr(self.store, "iter_records"):
+            return None
+        count = self.store.count()
+        if self._gp_cache is not None and self._gp_cache[0] == count:
+            return self._gp_cache[1]
+        gp = GroupPrior.from_records(self.store.iter_records())
+        self._gp_cache = (count, gp)
+        return gp
 
     # ── 召回(分級召回:防大量低級料把少數同豆 A/B 擠出 top-k;§3.1) ──
     def _recall(self, bean: BeanRoast, mechanism: BrewMechanism, flavor: FlavorProfile,
@@ -105,17 +122,25 @@ class Engine:
         # n_eff<1→low)。空同豆 → assess([]) → low(維持「無同豆校準」現行為)。跨豆參考不失:仍由
         # social_tendency(survey 全池)呈現。recommend/diagnose 不變(大方向本就借全鄰居)。
         ratio, flag, warnings = assess(same_bean)
+        # 經驗群組均值先驗(機制分軌,§1):薄同豆估計往群組均值收縮、冷啟動取代硬編 ~5 中點
+        # (治『先驗錯置中心』;群組均值=分級真值的量級聚合,非通俗因果,鐵則 §2/§5 安全)。
+        gp = self._group_prior()
+        proc = bean.process.value if bean.process else ""
+        prior_axes = (gp.axis_priors(params.brew_mechanism, bean.roast_band(), proc)
+                      if gp is not None else {})
         flavor: Dict[str, dict] = {}
         flavor_warnings: List[str] = []
         if same_bean:
             for axis in FLAVOR_AXES:
-                est = weighted_estimate(same_bean, f"flavor_{axis}", prior_value=None)
+                est = weighted_estimate(same_bean, f"flavor_{axis}",
+                                        prior_value=prior_axes.get(axis))
                 if est.value is not None:
                     flavor[axis] = est.__dict__
         else:
-            # 無同豆鄰居 → predicted_flavor 走物理粗略(coarse + 物理先驗導出的『保守寬區間』,
-            # 鐵則 §4 不給假精確點值 / §6 退先驗要寬);特色交給 social_tendency。
-            for axis, (val, lo, hi) in physics.coarse_flavor_axes(bean, params).items():
+            # 無同豆鄰居 → predicted_flavor 走群組均值先驗(機制分軌)+ 保守寬區間;某軸無群組
+            # 資料才退物理常數中點(鐵則 §4 不給假精確點值 / §6 退先驗要寬)。特色交給 social_tendency。
+            for axis, (val, lo, hi) in physics.coarse_flavor_axes(
+                    bean, params, group_prior=gp).items():
                 flavor[axis] = Estimate(val, lo, hi, 0.0, "prior").__dict__
             flavor_warnings.append(
                 "風味特色無同豆校準:predicted_flavor 為物理粗略(generic 大方向、保守寬區間、非實測),"

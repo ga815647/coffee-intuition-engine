@@ -125,32 +125,50 @@ COARSE_MARGIN = 2.5
 COARSE_MARGIN_NO_INFO = 3.0
 
 
-def coarse_flavor_axes(bean, params: BrewParams) -> Dict[str, Tuple[float, float, float]]:
-    """無同豆鄰居時的風味軸『物理粗略量級 + 保守寬區間』(0-10、coarse、非真值)。
+def coarse_flavor_axes(bean, params: BrewParams,
+                       group_prior=None) -> Dict[str, Tuple[float, float, float]]:
+    """無同豆鄰居時的風味軸『量級 + 保守寬區間』(0-10、coarse、非真值)。
 
-    只用焙度帶與萃取率的確立方向:淺焙→高酸高清晰、低苦低 body;深焙→低酸低清晰、高苦高 body;
-    萃取不足(EY<18)→升酸降甜;過萃(EY>22)→升苦降清晰。刻意 coarse:回傳
-    `{axis: (value, lower, upper)}`,value 為物理粗略量級,`[lower, upper]` 為由物理先驗導出的
-    **保守寬區間**(半寬 `COARSE_MARGIN`;焙度帶與 EY 皆未知時資訊近零 → 加寬到 `COARSE_MARGIN_NO_INFO`),
-    clamp 在 0-10。呼叫端標 source='prior',明示『物理粗略、非實測』。鐵則:冷啟動不給假精確的
-    單一點值(§4),退物理先驗一律附寬區間(§6)。
+    軸中心優先用 `group_prior`(機制分軌的經驗群組均值,§1 不跨機制;治『硬編 ~5 中點系統性偏低』)
+    ——某軸無群組資料才退回物理常數 `_COARSE_BASE` + 焙度方向。焙度方向**只**對「退物理常數」的軸施加
+    (有群組均值者已含焙度帶分層,不重複計入);EY 萃取方向跨機制通用、群組均值未條件於 EY,故一律可加。
+
+    回傳 `{axis: (value, lower, upper)}`,`[lower, upper]` 為由先驗導出的**保守寬區間**(半寬
+    `COARSE_MARGIN`;完全退物理且焙度帶與 EY 皆未知 → 資訊近零,加寬到 `COARSE_MARGIN_NO_INFO`),
+    clamp 在 0-10。呼叫端標 source='prior'。鐵則:冷啟動不給假精確點值(§4),退先驗一律附寬區間(§6)。
     """
     band = bean.roast_band() if hasattr(bean, "roast_band") else "unknown"
     ey = params.ey_pct
-    axes = dict(_COARSE_BASE)
+    proc = bean.process.value if getattr(bean, "process", None) else ""
+    emp = (group_prior.axis_priors(params.brew_mechanism, band, proc)
+           if group_prior is not None else {})
+
+    axes: Dict[str, float] = {}
+    have_emp: Dict[str, bool] = {}
+    for a, base in _COARSE_BASE.items():
+        if a in emp:
+            axes[a] = emp[a]; have_emp[a] = True       # 經驗群組均值(機制分軌)
+        else:
+            axes[a] = base; have_emp[a] = False         # 退物理常數中點
+
+    def _roast(a: str, delta: float) -> None:
+        if not have_emp.get(a):                          # 只對退物理常數的軸施加焙度方向
+            axes[a] += delta
     if band == "light":
-        axes["acidity"] += 1.5; axes["clarity"] += 1.0
-        axes["bitterness"] -= 1.0; axes["body"] -= 1.0
+        _roast("acidity", 1.5); _roast("clarity", 1.0)
+        _roast("bitterness", -1.0); _roast("body", -1.0)
     elif band == "dark":
-        axes["acidity"] -= 1.5; axes["clarity"] -= 1.0
-        axes["bitterness"] += 1.5; axes["body"] += 1.5
-    if ey is not None:
+        _roast("acidity", -1.5); _roast("clarity", -1.0)
+        _roast("bitterness", 1.5); _roast("body", 1.5)
+    if ey is not None:                                   # 萃取方向:群組均值未含 EY,故一律可加
         if ey < 18:
             axes["acidity"] += 1.0; axes["sweetness"] -= 0.5; axes["balance"] -= 0.5
         elif ey > 22:
             axes["bitterness"] += 1.0; axes["clarity"] -= 0.5; axes["balance"] -= 0.5
-    # 確立度 → 帶寬:焙度帶未知(無 Agtron)且無 EY 時連方向都站不穩 → 最寬區間。
-    margin = COARSE_MARGIN_NO_INFO if (band == "unknown" and ey is None) else COARSE_MARGIN
+    # 帶寬:有任一經驗群組均值(站得較穩)用 COARSE_MARGIN;完全退物理且焙度+EY 皆未知 → 最寬。
+    any_emp = any(have_emp.values())
+    margin = (COARSE_MARGIN_NO_INFO if (not any_emp and band == "unknown" and ey is None)
+              else COARSE_MARGIN)
     out: Dict[str, Tuple[float, float, float]] = {}
     for a, v in axes.items():
         v = round(min(10.0, max(0.0, v)), 1)

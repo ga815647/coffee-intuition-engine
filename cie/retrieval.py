@@ -23,11 +23,16 @@ FLAVOR_FIELD_KEYS = frozenset(f"flavor_{a}" for a in FLAVOR_AXES)
 # 算出假精確的窄區間;對 0-10 軸設地板,保證區間不窄於 ±0.5。參數軸(溫度/比例/研磨,尺度迥異)
 # 不套此地板。TODO(ingest S0):有 provenance 後可用「獨立來源數」進一步收緊 / 放寬,此處只先補地板。
 MIN_FLAVOR_MARGIN = 0.5
+# 有群組先驗但該風味軸無同豆值時的半寬:用先驗點 + 誠實寬區間(冷啟動級,鐵則 §4/§6)。
+PRIOR_ONLY_FLAVOR_MARGIN = 2.5
 
 MIN_NEIGHBORS = 3          # 少於此 → 收縮力道強 / 退回先驗
 MIN_A_WEIGHT_RATIO = 0.30  # top 結果 A 級權重佔比下限,否則降信心(防 C 級洗票)
 MIN_EFFECTIVE_WEIGHT = 1.0  # 聚合有效權重 Σ(grade×conf×sim) 下限;低於此即便鄰居「數量」夠也強制 low
 SHRINK_PRIOR_STRENGTH = 3.0  # 群組先驗的等效樣本數(貝氏收縮)
+# 機制根層的群組均值有效權重下限:低於此即該機制資料太薄、其均值不可信,GroupPrior.mean 回 None,
+# 呼叫端退回物理常數(不讓 1-2 筆退化資料的均值假裝成可信先驗;真語料各機制皆遠超此值)。
+MIN_GROUP_WEIGHT = 3.0
 
 
 @dataclass
@@ -47,6 +52,100 @@ class RetrievalResult:
     a_weight_ratio: float = 0.0
     confidence_flag: str = "low"  # low | medium | high
     warnings: List[str] = field(default_factory=list)
+
+
+# ─────────────────── 經驗群組均值先驗(機制分軌;冷啟動/薄證據取代硬編中點) ───────────────────
+
+@dataclass
+class _Acc:
+    """分級加權累加器:Σw、Σwv → 加權均值。"""
+    w: float = 0.0
+    wv: float = 0.0
+
+    def add(self, weight: float, value: float) -> None:
+        self.w += weight
+        self.wv += weight * value
+
+    @property
+    def mean(self) -> Optional[float]:
+        return self.wv / self.w if self.w > 0 else None
+
+
+class GroupPrior:
+    """機制分軌的經驗群組均值先驗(冷啟動/薄證據時取代硬編 ~5 中點,治『先驗錯置中心』)。
+
+    分級加權(GRADE_WEIGHT×confidence,排除 prediction)的軸均值。鐵則:
+      - §1 **永不跨機制平均**:層級頂端 = 機制均值,只在同機制內往下分(焙度帶 / 處理法)。
+        某機制完全無資料 → 該軸回 None,呼叫端退回物理常數(不借別機制的量級)。
+      - §3/§5 只做**量級**聚合(C 級允許壓量級),不碰方向投票;prediction 級不入(權重 0)。
+    層級:機制 → 機制×焙度帶 → 機制×焙度帶×處理法。薄群組往父層收縮(James-Stein,
+    lam=w/(w+k),k=SHRINK_PRIOR_STRENGTH),樣本足才信具體層、稀疏就靠機制大盤。
+    """
+
+    def __init__(self) -> None:
+        # key: ("m",mech) / ("mb",mech,band) / ("mbp",mech,band,proc) → {axis: _Acc}
+        self._acc: Dict[tuple, Dict[str, _Acc]] = {}
+
+    def _bucket(self, key: tuple) -> Dict[str, _Acc]:
+        return self._acc.setdefault(key, {a: _Acc() for a in FLAVOR_AXES})
+
+    @classmethod
+    def from_records(cls, records) -> "GroupPrior":
+        gp = cls()
+        for r in records:
+            grade = getattr(r.grade, "value", r.grade)
+            w0 = GRADE_WEIGHT.get(grade, 0.0)
+            if w0 <= 0:                       # prediction / 未知 → 不入先驗(§5)
+                continue
+            conf = getattr(r, "confidence", 0.5)
+            w = w0 * (conf if conf is not None else 0.5)
+            if w <= 0:
+                continue
+            mech = r.params.brew_mechanism.value
+            band = r.bean.roast_band()
+            proc = proc_norm(r.bean.process.value if r.bean.process else "")
+            keys = [("m", mech), ("mb", mech, band)]
+            if proc:
+                keys.append(("mbp", mech, band, proc))
+            for a in FLAVOR_AXES:
+                v = getattr(r.flavor, a)
+                if v is None:
+                    continue
+                for k in keys:
+                    gp._bucket(k)[a].add(w, v)
+        return gp
+
+    def mean(self, axis: str, mechanism, roast_band: str, process) -> Optional[float]:
+        """機制內層級收縮均值;該機制該軸無資料 → None(呼叫端退物理常數)。"""
+        mech = getattr(mechanism, "value", mechanism)
+        proc = proc_norm(getattr(process, "value", process) or "")
+        root = self._acc.get(("m", mech))
+        # §1:不跨機制借量級;且機制根層太薄(< MIN_GROUP_WEIGHT)→ 均值不可信,退物理常數。
+        if not root or root[axis].w < MIN_GROUP_WEIGHT:
+            return None
+        est = root[axis].mean
+        k = SHRINK_PRIOR_STRENGTH
+        mb = self._acc.get(("mb", mech, roast_band))
+        if mb and mb[axis].mean is not None:
+            acc = mb[axis]
+            lam = acc.w / (acc.w + k)
+            est = lam * acc.mean + (1 - lam) * est
+        if proc:
+            mbp = self._acc.get(("mbp", mech, roast_band, proc))
+            if mbp and mbp[axis].mean is not None:
+                acc = mbp[axis]
+                lam = acc.w / (acc.w + k)
+                est = lam * acc.mean + (1 - lam) * est
+        return est
+
+    def axis_priors(self, mechanism, roast_band: str, process) -> Dict[str, float]:
+        """該機制/焙度/處理法有經驗均值的所有風味軸 → {axis: prior}。"""
+        out: Dict[str, float] = {}
+        for a in FLAVOR_AXES:
+            m = self.mean(a, mechanism, roast_band, process)
+            if m is not None:
+                out[a] = m
+        return out
 
 
 def _weight(hit: dict) -> float:
@@ -70,6 +169,12 @@ def weighted_estimate(
         # 無鄰居 → 純先驗,寬區間
         if prior_value is None:
             return Estimate(None, None, None, 0.0, "prior")
+        # 有群組先驗:風味軸給先驗點 + 誠實寬區間(clamp 0-10);參數軸尺度迥異,不套此地板。
+        if field_key in FLAVOR_FIELD_KEYS:
+            m = PRIOR_ONLY_FLAVOR_MARGIN
+            lo = round(max(0.0, prior_value - m), 2)
+            hi = round(min(10.0, prior_value + m), 2)
+            return Estimate(round(prior_value, 2), lo, hi, 0.0, "prior")
         return Estimate(prior_value, None, None, 0.0, "prior")
 
     wsum = sum(w for w, _ in pairs)
