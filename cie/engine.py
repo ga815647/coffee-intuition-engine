@@ -11,7 +11,7 @@ from . import physics
 from .canonical import CanonicalStore, maybe_get_canonical
 from .retrieval import (
     RANKABLE_STD_MIN, Estimate, GroupPrior, RetrievalResult, assess, bean_match,
-    social_tendency, weighted_estimate,
+    conformal_active_for, social_tendency, weighted_estimate,
 )
 from .schema import (
     FLAVOR_AXES, BeanRoast, BrewMechanism, BrewParams, FlavorProfile, Grade, Record,
@@ -130,10 +130,17 @@ class Engine:
                       if gp is not None else {})
         flavor: Dict[str, dict] = {}
         flavor_warnings: List[str] = []
+        # conformal q̂ 讀取閘(鐵則 §4):q̂ 表只在線上嵌入器 == 校準嵌入器時適用;不符(如離線
+        # 退回 hash 嵌入器)→ mechanism=None → conformal_z 退回已驗證安全的 1.64,絕不套尺度
+        # 對不上的 q̂(可能造成比 1.64 更窄、無覆蓋保證的區間)。見 retrieval.conformal_active_for。
+        use_mech = (params.brew_mechanism
+                    if conformal_active_for(getattr(self.store, "model_id", None))
+                    else None)
         if same_bean:
             for axis in FLAVOR_AXES:
                 est = weighted_estimate(same_bean, f"flavor_{axis}",
-                                        prior_value=prior_axes.get(axis))
+                                        prior_value=prior_axes.get(axis),
+                                        mechanism=use_mech)
                 if est.value is not None:
                     flavor[axis] = est.__dict__
         else:

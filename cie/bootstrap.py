@@ -9,10 +9,10 @@
 
 之後跑 `python -m cie.rebuild` 從 canonical 用『當前』嵌入器重嵌、灌入向量庫
 (Vectorize / Qdrant / 記憶體)。**驗收**:rebuild 後向量庫筆數 ≈ corpus/global.jsonl
-行數(目前 446),而非 seeds/anchors.jsonl 的 6 筆。
+行數(目前 537),而非 seeds/anchors.jsonl 的 6 筆。
 
 為何不直接用 `cie.seed`:`seed` 只灌 `seeds/anchors.jsonl`(6 筆冷啟動錨點,
-給空庫 demo 用)。真正的策展真相是 `corpus/global.jsonl`(446 筆,
+給空庫 demo 用)。真正的策展真相是 `corpus/global.jsonl`(537 筆,
 `tools/qa_merge.py` 由 `corpus/raw/` provenance 重生)。canonical 真相層 =
 此策展語料(初始) + 之後 `log_calibration` 累積的人類校準回饋。
 

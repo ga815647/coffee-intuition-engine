@@ -121,7 +121,7 @@ docker run --rm -p 8000:8000 --env-file .env cie-mcp   # 本地;未注入 $PORT 
 
 **已上線 ✅**(2026-06,asia-east1):`https://cie-mcp-936606065390.asia-east1.run.app`。三命門 + 冷啟動持久經真 MCP client 線上驗過(`tools/smoke_remote.py`)。
 
-本輪上線**不用 Vectorize**(降為選項):向量庫收進行程記憶體,冷啟動從 **D1** canonical 重嵌重建(446 筆數秒);整個雲端依賴只剩 Workers AI(嵌入)+ D1(canonical)兩個無狀態 REST。canonical 改用 **D1**(SQLite-over-HTTP)而非 R2:逐筆 `INSERT OR REPLACE`(同 id 後寫者勝)是原子操作,**無 R2 整檔 read-modify-write 並發 race**;且 D1 免綁卡即啟用。詳見 DESIGN §14.7 / §15.1。
+本輪上線**不用 Vectorize**(降為選項):向量庫收進行程記憶體,冷啟動從 **D1** canonical 重嵌重建(537 筆數秒);整個雲端依賴只剩 Workers AI(嵌入)+ D1(canonical)兩個無狀態 REST。canonical 改用 **D1**(SQLite-over-HTTP)而非 R2:逐筆 `INSERT OR REPLACE`(同 id 後寫者勝)是原子操作,**無 R2 整檔 read-modify-write 並發 race**;且 D1 免綁卡即啟用。詳見 DESIGN §14.7 / §15.1。
 
 ```
 # 環境變數(Secret Manager;見 .env.example 的「生產上線 profile」)
@@ -139,7 +139,7 @@ CIE_MCP_STATELESS=1                 # 命門,必須 1
 
 ```bash
 # 一次性:本機灌策展語料到 D1 canonical(需上面 CF / D1 金鑰在本機 .env)
-python -m cie.bootstrap             # corpus/global.jsonl(446)→ D1 canonical
+python -m cie.bootstrap             # corpus/global.jsonl(537)→ D1 canonical
 
 # 部署(--source 走 Cloud Build;細節見 DESIGN §14.7 / 部署備忘)
 gcloud run deploy cie-mcp --source . --region=asia-east1 \

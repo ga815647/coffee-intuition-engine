@@ -1,0 +1,165 @@
+{
+  "header": {
+    "generated_utc": "2026-06-15T11:43:02+00:00",
+    "embedder": "workers_ai:@cf/baai/bge-m3",
+    "corpus": {
+      "path": "global.jsonl",
+      "n_records": 537,
+      "md5": "6b2bc8b4c70b9643c64a6d38924e0c60"
+    },
+    "nominal_coverage": 0.9,
+    "k_folds": 5,
+    "n_holdout": 324,
+    "q_entries_loaded": 9,
+    "interpretation": "IN-SAMPLE sanity check over deterministic CV folds — NOT independent out-of-sample validation. q̂ is fit on the same z-path score set this coverage is measured against; with the conservative conformal quantile + MIN_FLAVOR_MARGIN floor + [0,10] clamp, per-(mechanism×axis) coverage ≥ nominal is largely guaranteed by ARITHMETIC, not generalization. Thin cells (n≈22–53) clear nominal by only ~0.02–0.04, so deployment sampling on new beans can dip below. What this DOES prove: q̂ written correctly, floor/clamp applied, MAE unchanged (point estimates not moved), no §1 cross-mechanism leak. True generalization awaits blind-test on held-out beans."
+  },
+  "q_table_loaded": {
+    "immersion": {
+      "body": 3.3334,
+      "clarity": 5.92,
+      "acidity": 3.1528,
+      "bitterness": 1.9467
+    },
+    "percolation": {
+      "acidity": 1.5334,
+      "body": 1.6267,
+      "aftertaste": 0.7334,
+      "bitterness": 1.3318,
+      "clarity": 2.4001
+    }
+  },
+  "overall": {
+    "n": 2222,
+    "mae": 0.578,
+    "rmse": 0.7825,
+    "coverage": 0.9698
+  },
+  "by_cell": {
+    "immersion": {
+      "acidity": {
+        "n": 130,
+        "covered": 121,
+        "coverage": 0.9307692307692308
+      },
+      "sweetness": {
+        "n": 129,
+        "covered": 124,
+        "coverage": 0.9612403100775194
+      },
+      "bitterness": {
+        "n": 128,
+        "covered": 127,
+        "coverage": 0.9921875
+      },
+      "body": {
+        "n": 132,
+        "covered": 129,
+        "coverage": 0.9772727272727273
+      },
+      "aftertaste": {
+        "n": 128,
+        "covered": 124,
+        "coverage": 0.96875
+      },
+      "balance": {
+        "n": 129,
+        "covered": 125,
+        "coverage": 0.9689922480620154
+      },
+      "clarity": {
+        "n": 133,
+        "covered": 130,
+        "coverage": 0.9774436090225563
+      }
+    },
+    "percolation": {
+      "acidity": {
+        "n": 128,
+        "covered": 122,
+        "coverage": 0.953125
+      },
+      "sweetness": {
+        "n": 127,
+        "covered": 124,
+        "coverage": 0.9763779527559056
+      },
+      "bitterness": {
+        "n": 126,
+        "covered": 124,
+        "coverage": 0.9841269841269841
+      },
+      "body": {
+        "n": 126,
+        "covered": 121,
+        "coverage": 0.9603174603174603
+      },
+      "aftertaste": {
+        "n": 124,
+        "covered": 120,
+        "coverage": 0.967741935483871
+      },
+      "balance": {
+        "n": 126,
+        "covered": 123,
+        "coverage": 0.9761904761904762
+      },
+      "clarity": {
+        "n": 128,
+        "covered": 127,
+        "coverage": 0.9921875
+      }
+    },
+    "pressure": {
+      "bitterness": {
+        "n": 62,
+        "covered": 60,
+        "coverage": 0.967741935483871
+      },
+      "body": {
+        "n": 62,
+        "covered": 62,
+        "coverage": 1.0
+      },
+      "aftertaste": {
+        "n": 62,
+        "covered": 60,
+        "coverage": 0.967741935483871
+      },
+      "clarity": {
+        "n": 62,
+        "covered": 58,
+        "coverage": 0.9354838709677419
+      },
+      "acidity": {
+        "n": 60,
+        "covered": 56,
+        "coverage": 0.9333333333333333
+      },
+      "sweetness": {
+        "n": 60,
+        "covered": 58,
+        "coverage": 0.9666666666666667
+      },
+      "balance": {
+        "n": 60,
+        "covered": 60,
+        "coverage": 1.0
+      }
+    }
+  },
+  "by_mechanism": {
+    "immersion": 0.9681,
+    "percolation": 0.9729,
+    "pressure": 0.9673
+  },
+  "by_axis": {
+    "acidity": 0.9403,
+    "sweetness": 0.9684,
+    "bitterness": 0.9842,
+    "body": 0.975,
+    "aftertaste": 0.9682,
+    "balance": 0.9778,
+    "clarity": 0.9752
+  },
+  "violations": []
+}

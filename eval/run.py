@@ -45,7 +45,7 @@ from cie.store import StoreBackend, VectorStore
 
 DATASET_PATH = Path(__file__).resolve().parent / "dataset.jsonl"
 REPORT_PATH = Path(__file__).resolve().parent / "report.json"
-# 召回庫來源:策展語料(446 筆真相),不是 6 筆 seeds/anchors.jsonl。
+# 召回庫來源:策展語料(537 筆真相),不是 6 筆 seeds/anchors.jsonl。
 CORPUS_PATH = Path(__file__).resolve().parent.parent / "corpus" / "global.jsonl"
 NOMINAL_COVERAGE = 0.90       # weighted_estimate 用 ~90% 名目區間
 HOLDOUT_GRADES = ("A", "B")   # C 級永不當 holdout 真值(鐵則 §3:開環只壓量級)
@@ -170,7 +170,10 @@ def _score_holdouts(engine: Engine, holdouts: List[Record],
             pv = est["value"] if est else None
             lo = est["lower"] if est else None
             hi = est["upper"] if est else None
-            entry: Dict = {"true": true_v, "pred": pv, "lower": lo, "upper": hi}
+            # source(neighbors / shrunk / prior):conformal 校準只取走 weighted_estimate
+            # z 路徑(neighbors / shrunk)的點;prior / 物理粗略路徑不使用 z 係數,須排除。
+            entry: Dict = {"true": true_v, "pred": pv, "lower": lo, "upper": hi,
+                           "source": est.get("source") if est else None}
             if true_v is not None and pv is not None:
                 entry["abs_err"] = round(abs(pv - true_v), 4)
                 if lo is not None and hi is not None:
@@ -336,12 +339,18 @@ def _neighbor_grounding(per_record: List[Dict]) -> Dict:
 
 def run_cv_eval(k: int = DEFAULT_K, config: Config = CONFIG,
                 nominal_coverage: float = NOMINAL_COVERAGE,
-                corpus_path: Path = CORPUS_PATH) -> Dict:
+                corpus_path: Path = CORPUS_PATH,
+                include_per_record: bool = False) -> Dict:
     """對語料 A/B 級記錄做**按機制分層的 k-fold** 盲測 CV。回傳結構化報告 dict。
 
     每折:holdout = 該折 A/B 記錄;召回庫 = 全語料(含 C)**按內容指紋扣除本折 holdout**。
     每筆 A/B 記錄正好被評測一次(out-of-fold),最後彙總分機制 n/MAE/覆蓋/方向。
     C 級永遠留在召回庫、**永不當 holdout 真值**。
+
+    `include_per_record=True` 時在回傳 dict 加 `"per_record"`(每筆每軸 true/pred/lower/upper)——
+    供 conformal 校準(tools/calibrate_conformal.py)從留出殘差反推 q̂ 用;預設 False,故 main() /
+    report.json 不受影響。**鐵則 §15.2:per_record 是 out-of-fold 留出預測**(holdout 不在自己那折的
+    召回庫),故拿它校準 q̂ 無折內洩漏。
     """
     corpus = read_jsonl(corpus_path)
     eligible = [r for r in corpus if r.grade.value in HOLDOUT_GRADES]  # C 不可當 holdout
@@ -381,7 +390,7 @@ def run_cv_eval(k: int = DEFAULT_K, config: Config = CONFIG,
         fold_summaries.append({"fold": fi, "n_holdout": len(fold), "library_count": before})
 
     axes_report, overall, direction = _aggregate(all_per_record)
-    return {
+    report = {
         "mode": "cv_stratified",
         "k_folds": k,
         "n_holdout": len(all_per_record),
@@ -407,6 +416,9 @@ def run_cv_eval(k: int = DEFAULT_K, config: Config = CONFIG,
         "embed_cache": shared_embedder.cache_info(),  # size/hits/misses:驗證跨折去重生效
         "note": "離線雜湊嵌入數值僅示意;看分機制方向與覆蓋,不看絕對 MAE。",
     }
+    if include_per_record:
+        report["per_record"] = all_per_record
+    return report
 
 
 # ────────────────────────────── 評測主體:dataset 路徑(洩漏偵測器回歸) ──────────────────────────────

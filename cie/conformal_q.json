@@ -1,0 +1,194 @@
+{
+  "provenance": {
+    "generated_utc": "2026-06-15T10:59:46+00:00",
+    "embedder": "workers_ai:@cf/baai/bge-m3",
+    "corpus": {
+      "path": "global.jsonl",
+      "n_records": 537,
+      "md5": "6b2bc8b4c70b9643c64a6d38924e0c60"
+    },
+    "nominal_coverage": 0.9,
+    "alpha": 0.1,
+    "k_folds": 5,
+    "min_n": 20,
+    "method": "mondrian split-conformal (per mechanism×axis), conservative finite-sample quantile rank=ceil((n+1)(1-alpha)); normalized score s=1.64*|true-pred|/halfwidth; z-path(neighbors/shrunk) symmetric non-clamped non-floored points only",
+    "exclusion_stats": {
+      "immersion": {
+        "acidity": {
+          "seen": 134,
+          "skip_clamped": 9,
+          "skip_not_z_path": 80,
+          "skip_missing": 4,
+          "skip_floored": 2,
+          "used": 39
+        },
+        "sweetness": {
+          "seen": 134,
+          "skip_clamped": 28,
+          "skip_not_z_path": 81,
+          "skip_missing": 5,
+          "skip_floored": 2,
+          "used": 18
+        },
+        "bitterness": {
+          "seen": 134,
+          "skip_clamped": 24,
+          "skip_not_z_path": 80,
+          "used": 22,
+          "skip_missing": 6,
+          "skip_floored": 2
+        },
+        "body": {
+          "seen": 134,
+          "used": 42,
+          "skip_not_z_path": 83,
+          "skip_floored": 1,
+          "skip_clamped": 6,
+          "skip_missing": 2
+        },
+        "aftertaste": {
+          "seen": 134,
+          "skip_clamped": 27,
+          "skip_not_z_path": 80,
+          "skip_missing": 6,
+          "skip_floored": 3,
+          "used": 18
+        },
+        "balance": {
+          "seen": 134,
+          "skip_clamped": 27,
+          "skip_not_z_path": 81,
+          "skip_missing": 5,
+          "used": 19,
+          "skip_floored": 2
+        },
+        "clarity": {
+          "seen": 134,
+          "skip_clamped": 22,
+          "skip_not_z_path": 83,
+          "used": 26,
+          "skip_floored": 2,
+          "skip_missing": 1
+        }
+      },
+      "percolation": {
+        "acidity": {
+          "seen": 128,
+          "skip_not_z_path": 68,
+          "used": 53,
+          "skip_floored": 5,
+          "skip_clamped": 2
+        },
+        "sweetness": {
+          "seen": 128,
+          "skip_not_z_path": 68,
+          "skip_clamped": 34,
+          "used": 15,
+          "skip_floored": 10,
+          "skip_missing": 1
+        },
+        "bitterness": {
+          "seen": 128,
+          "skip_not_z_path": 69,
+          "skip_clamped": 21,
+          "used": 31,
+          "skip_missing": 2,
+          "skip_floored": 5
+        },
+        "body": {
+          "seen": 128,
+          "skip_not_z_path": 68,
+          "used": 52,
+          "skip_floored": 6,
+          "skip_missing": 2
+        },
+        "aftertaste": {
+          "seen": 128,
+          "skip_not_z_path": 68,
+          "used": 43,
+          "skip_clamped": 5,
+          "skip_missing": 4,
+          "skip_floored": 8
+        },
+        "balance": {
+          "seen": 128,
+          "skip_not_z_path": 69,
+          "skip_clamped": 34,
+          "used": 16,
+          "skip_floored": 7,
+          "skip_missing": 2
+        },
+        "clarity": {
+          "seen": 128,
+          "skip_not_z_path": 68,
+          "skip_clamped": 33,
+          "used": 25,
+          "skip_floored": 2
+        }
+      },
+      "pressure": {
+        "acidity": {
+          "seen": 62,
+          "skip_missing": 2,
+          "skip_not_z_path": 45,
+          "used": 15
+        },
+        "sweetness": {
+          "seen": 62,
+          "skip_missing": 2,
+          "skip_not_z_path": 45,
+          "used": 5,
+          "skip_clamped": 10
+        },
+        "bitterness": {
+          "seen": 62,
+          "skip_not_z_path": 47,
+          "used": 12,
+          "skip_clamped": 3
+        },
+        "body": {
+          "seen": 62,
+          "skip_not_z_path": 47,
+          "used": 11,
+          "skip_clamped": 4
+        },
+        "aftertaste": {
+          "seen": 62,
+          "skip_not_z_path": 47,
+          "used": 3,
+          "skip_clamped": 10,
+          "skip_floored": 2
+        },
+        "balance": {
+          "seen": 62,
+          "skip_missing": 2,
+          "skip_not_z_path": 45,
+          "used": 5,
+          "skip_clamped": 10
+        },
+        "clarity": {
+          "seen": 62,
+          "skip_not_z_path": 47,
+          "used": 5,
+          "skip_clamped": 10
+        }
+      }
+    }
+  },
+  "fallback": 1.64,
+  "q": {
+    "immersion": {
+      "body": 3.3334,
+      "clarity": 5.92,
+      "acidity": 3.1528,
+      "bitterness": 1.9467
+    },
+    "percolation": {
+      "acidity": 1.5334,
+      "body": 1.6267,
+      "aftertaste": 0.7334,
+      "bitterness": 1.3318,
+      "clarity": 2.4001
+    }
+  }
+}

@@ -8,10 +8,12 @@
 """
 from __future__ import annotations
 
+import json
 import math
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .schema import FLAVOR_AXES
@@ -49,6 +51,80 @@ MIN_GROUP_WEIGHT = 3.0
 # 0.03/0.08),語料漂移可能翻轉個別格 → 動語料後須重跑 CV 重校(對應 corpus 測試也須更新)。
 # bitterness 跨機制不同判定正是 §1「變異只在機制內算」鐵證。
 RANKABLE_STD_MIN = 0.75
+
+# ─────────────────── 按機制 split-conformal 半寬係數 q̂(取代魔術數 1.64) ───────────────────
+# 鐵則 §4(誠實不確定)+ §1(不跨機制平均)。原本區間半寬 = 1.64 × spread × widen,假設殘差高斯;
+# 實測覆蓋 0.96 ≫ 名目 0.90 → 殘差非高斯、系統性過寬。正解:用**留出殘差的經驗分位**校準每個
+# (機制, 風味軸) 的歸一化係數 q̂(s = |true-pred| / (spread×widen) 的有限樣本 conformal 分位),
+# 注入 cie/conformal_q.json,取代 1.64。
+# **安全設計(load-bearing):**
+#   1. 表缺席 / 壞檔 / 該 (機制,軸) 無條目 → 退回 1.64 → **與校準前逐位元相同**(byte-identical)。
+#   2. 只作用於風味軸(field_key ∈ FLAVOR_FIELD_KEYS);參數軸恆走 1.64 fallback。
+#   3. q̂ 由 tools/calibrate_conformal.py 用**保守有限樣本 conformal 分位**算(ceil((n+1)(1-α)) 名次;
+#      名次 > n 即資料不足保證 → 不寫該條目 → fallback)→ 覆蓋率對齊名目、絕不低於(§4 寧過勿欠)。
+#   4. MIN_FLAVOR_MARGIN 地板 + [0,10] 夾域在 q̂ 之後照舊套用 → 覆蓋率只增不減。
+CONFORMAL_Z_FALLBACK = 1.64
+_Q_TABLE_PATH = Path(__file__).resolve().parent / "conformal_q.json"
+
+
+def _load_q_artifact() -> Tuple[Dict[str, Dict[str, float]], Optional[str]]:
+    """載入 ({機制: {軸: q̂}} 表, 校準嵌入器 model_id)。
+
+    缺席 / 壞檔 / 結構不符 → ({}, None)(全退 1.64 fallback)。
+    embedder 取自 provenance.embedder,供讀取時比對線上嵌入器(見 conformal_active_for)。
+    """
+    try:
+        raw = json.loads(_Q_TABLE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, None
+    if not isinstance(raw, dict):
+        return {}, None
+    out: Dict[str, Dict[str, float]] = {}
+    table = raw.get("q")
+    if isinstance(table, dict):
+        for mech, axes in table.items():
+            if not isinstance(axes, dict):
+                continue
+            clean = {a: float(z) for a, z in axes.items()
+                     if isinstance(z, (int, float)) and math.isfinite(z) and z > 0}
+            if clean:
+                out[str(mech)] = clean
+    embedder: Optional[str] = None
+    prov = raw.get("provenance")
+    if isinstance(prov, dict):
+        emb = prov.get("embedder")
+        if isinstance(emb, str) and emb:
+            embedder = emb
+    return out, embedder
+
+
+_Q_TABLE, _Q_TABLE_EMBEDDER = _load_q_artifact()
+
+
+def conformal_active_for(model_id: Optional[str]) -> bool:
+    """q̂ 表是否適用於 `model_id` 這個嵌入器(鐵則 §4 讀取閘)。
+
+    split-conformal 的覆蓋保證**只對校準時的檢索分佈成立**。q̂(部分 < 1.64)是用校準
+    嵌入器(provenance.embedder,如 workers_ai:@cf/baai/bge-m3)的 spread 尺度擬合的;
+    線上嵌入器若不同(例如離線預設退回 LocalHashEmbedder=local-hash:N),spread 尺度對
+    不上,套上 q̂ 可能造出比已驗證安全的 1.64 更**窄**的區間 → 無覆蓋保證 → 不適用。
+    表空 / 無 embedder 記錄 / model_id 不符 → 保守視為不適用(呼叫端應退回 1.64)。
+    """
+    if not _Q_TABLE or _Q_TABLE_EMBEDDER is None or not model_id:
+        return False
+    return model_id == _Q_TABLE_EMBEDDER
+
+
+def conformal_z(mechanism, field_key: str) -> float:
+    """回傳該 (機制, 風味軸) 的 conformal 半寬係數 q̂;無校準條目 → 1.64 fallback。
+
+    鐵則 §1:機制是硬鍵,絕不跨機制取 q̂。鐵則 §4:fallback 永遠是已驗證安全的 1.64。
+    """
+    if mechanism is None or field_key not in FLAVOR_FIELD_KEYS:
+        return CONFORMAL_Z_FALLBACK
+    mech = getattr(mechanism, "value", mechanism)
+    axis = field_key[len("flavor_"):]
+    return _Q_TABLE.get(str(mech), {}).get(axis, CONFORMAL_Z_FALLBACK)
 
 
 @dataclass
@@ -214,8 +290,13 @@ def weighted_estimate(
     hits: List[dict],
     field_key: str,
     prior_value: Optional[float] = None,
+    mechanism=None,
 ) -> Estimate:
-    """對某 payload 數值欄做分級加權估計 + 貝氏收縮 + 經驗分位區間。"""
+    """對某 payload 數值欄做分級加權估計 + 貝氏收縮 + 經驗分位區間。
+
+    `mechanism`(BrewMechanism 或其 .value 字串)只用於選 conformal 半寬係數 q̂
+    (按機制校準,鐵則 §1);None / 參數軸 → 退回 1.64,行為與校準前相同。
+    """
     pairs = [(_weight(h), h["payload"].get(field_key)) for h in hits]
     pairs = [(w, v) for w, v in pairs if v is not None and w > 0]
 
@@ -255,7 +336,10 @@ def weighted_estimate(
         spread = 1.0
     # 樣本越少區間越寬(放大係數)
     widen = 1.0 + max(0, MIN_NEIGHBORS - len(vals)) * 0.5
-    margin = 1.64 * spread * widen  # ~90% 名目
+    # 半寬係數:按 (機制, 風味軸) 校準的 split-conformal q̂(取代魔術數 1.64);
+    # 無校準條目 / 參數軸 / 無機制 → 退回 1.64,逐位元相同(見 conformal_z)。
+    z = conformal_z(mechanism, field_key)
+    margin = z * spread * widen  # 名目 ~90%(q̂ 校準後對齊實測覆蓋)
     lo = value - margin
     hi = value + margin
     # 0-10 風味軸的絕對 margin 地板:近重複鄰居 spread→0 不得造出假精確窄區間(鐵則 §4)。

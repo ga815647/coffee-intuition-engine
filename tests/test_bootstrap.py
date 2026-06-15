@@ -1,5 +1,5 @@
 """bootstrap 單元測試:把策展語料 corpus/global.jsonl 載入 canonical 真相層,
-再 rebuild 出向量庫。核心驗收:**rebuild 後筆數 ≈ 語料行數(446),而非 6 筆 seeds**。
+再 rebuild 出向量庫。核心驗收:**rebuild 後筆數 ≈ 語料行數(537),而非 6 筆 seeds**。
 
 涵蓋:
   - 空 canonical 載入語料筆數正確、可無損列舉回;

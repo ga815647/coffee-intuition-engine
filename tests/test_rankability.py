@@ -24,7 +24,7 @@ from cie import physics
 from cie.engine import Engine
 from cie.portability import read_jsonl
 from cie.retrieval import (MIN_GROUP_WEIGHT, RANKABLE_STD_MIN, GroupPrior, _Acc,
-                           weighted_estimate)
+                           conformal_active_for, weighted_estimate)
 from cie.schema import (FLAVOR_AXES, BeanRoast, BrewMechanism, BrewParams,
                         FlavorProfile, Grade, Process, Record)
 from cie.store import VectorStore
@@ -226,8 +226,14 @@ def test_predict_same_bean_path_also_annotated():
     gp = eng._group_prior()
     proc = bean.process.value if bean.process else ""
     prior_axes = gp.axis_priors(params.brew_mechanism, bean.roast_band(), proc)
+    # 須鏡射 predict() 的實際呼叫(含 conformal q̂ 讀取閘):線上嵌入器 == 校準嵌入器才傳
+    # mechanism 走 per-機制 q̂,否則(離線 hash 嵌入器)傳 None 退回 1.64。否則 truth 與
+    # predict 用不同係數,lower/upper 不符(非標旗 bug,是 conformal 閘生效)。
+    use_mech = (params.brew_mechanism
+                if conformal_active_for(getattr(eng.store, "model_id", None)) else None)
     for axis in ("balance", "acidity"):
-        truth = weighted_estimate(same, f"flavor_{axis}", prior_value=prior_axes.get(axis))
+        truth = weighted_estimate(same, f"flavor_{axis}", prior_value=prior_axes.get(axis),
+                                  mechanism=use_mech)
         assert pf[axis]["value"] == truth.value          # 點估逐位相同(未被標旗挪動)
         assert pf[axis]["lower"] == truth.lower          # 下界未被收窄
         assert pf[axis]["upper"] == truth.upper          # 上界未被收窄
