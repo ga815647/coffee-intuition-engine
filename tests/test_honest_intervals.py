@@ -129,6 +129,36 @@ def test_param_axis_not_floored():
     assert (est.upper - est.value) < MIN_FLAVOR_MARGIN   # 未被地板撐寬(證明地板是風味軸專屬)
 
 
+def test_neighbor_flavor_interval_clamped_to_0_10():
+    """主鄰居路徑的 0-10 風味軸:大離散把裸區間推出軸域 → 夾回 [0,10](鐵則 §4 不超域)。"""
+    # 高值 + 大離散 → raw upper > 10、低值 + 大離散 → raw lower < 0
+    high = [_hit(9.5, field="flavor_balance", hid="a"),
+            _hit(8.5, field="flavor_balance", hid="b"),
+            _hit(9.8, field="flavor_balance", hid="c")]
+    est_hi = weighted_estimate(high, "flavor_balance")
+    assert est_hi.upper <= 10.0                          # 上界夾回 10
+    assert est_hi.lower >= 0.0
+    assert est_hi.value == pytest.approx(round(est_hi.value, 2))  # 點估不被夾改
+
+    low = [_hit(0.4, field="flavor_bitterness", hid="a"),
+           _hit(0.2, field="flavor_bitterness", hid="b"),
+           _hit(1.5, field="flavor_bitterness", hid="c")]
+    est_lo = weighted_estimate(low, "flavor_bitterness")
+    assert est_lo.lower >= 0.0                           # 下界夾回 0(不再出現 -0.4)
+    assert est_lo.upper <= 10.0
+
+
+def test_neighbor_param_axis_interval_not_clamped():
+    """夾域只套風味軸:參數軸(水溫 ~95、尺度非 0-10)的區間絕不被夾回 [0,10]。"""
+    assert "water_temp_c" not in FLAVOR_FIELD_KEYS
+    hits = [_hit(95.0, field="water_temp_c", hid="a"),
+            _hit(93.0, field="water_temp_c", hid="b"),
+            _hit(97.0, field="water_temp_c", hid="c")]
+    est = weighted_estimate(hits, "water_temp_c")
+    assert est.upper > 10.0                              # 證明參數軸未被夾(上界遠超 10)
+    assert est.value > 10.0
+
+
 # ────────────────── Item 3:eval 冷啟動判定改用 has_AB_neighbor ──────────────────
 
 def _score_one(neighbor_grade: Grade):

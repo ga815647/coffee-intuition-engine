@@ -202,10 +202,19 @@ def weighted_estimate(
     # 樣本越少區間越寬(放大係數)
     widen = 1.0 + max(0, MIN_NEIGHBORS - len(vals)) * 0.5
     margin = 1.64 * spread * widen  # ~90% 名目
+    lo = value - margin
+    hi = value + margin
     # 0-10 風味軸的絕對 margin 地板:近重複鄰居 spread→0 不得造出假精確窄區間(鐵則 §4)。
     if field_key in FLAVOR_FIELD_KEYS:
         margin = max(margin, MIN_FLAVOR_MARGIN)
-    return Estimate(round(value, 2), round(value - margin, 2), round(value + margin, 2),
+        lo = value - margin
+        hi = value + margin
+        # 夾回 [0,10] 軸定義域:真值必落此域,夾掉外側多餘區間=純送資訊量、絕不漏掉任何域內真值
+        # → 覆蓋率單調不降(鐵則 §4)。prior-only 與 physics 粗略路徑已夾,此為主鄰居路徑原本的漏夾。
+        # **僅限風味軸**——參數軸(溫度/比例/研磨/接觸時間)尺度迥異、不在 FLAVOR_FIELD_KEYS,絕不夾。
+        lo = max(0.0, lo)
+        hi = min(10.0, hi)
+    return Estimate(round(value, 2), round(lo, 2), round(hi, 2),
                     round(n_eff, 2), source)
 
 
