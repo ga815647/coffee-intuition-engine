@@ -10,8 +10,8 @@ from typing import Dict, List, Optional
 from . import physics
 from .canonical import CanonicalStore, maybe_get_canonical
 from .retrieval import (
-    Estimate, GroupPrior, RetrievalResult, assess, bean_match, social_tendency,
-    weighted_estimate,
+    RANKABLE_STD_MIN, Estimate, GroupPrior, RetrievalResult, assess, bean_match,
+    social_tendency, weighted_estimate,
 )
 from .schema import (
     FLAVOR_AXES, BeanRoast, BrewMechanism, BrewParams, FlavorProfile, Grade, Record,
@@ -145,6 +145,28 @@ class Engine:
             flavor_warnings.append(
                 "風味特色無同豆校準:predicted_flavor 為物理粗略(generic 大方向、保守寬區間、非實測),"
                 "特色見 social_tendency(跨豆/社群參考、非本豆實測)。"
+            )
+        # 近常數軸誠實標(鐵則 §3 方向>絕對 / §4 誠實不確定):某軸在**此機制內**(§1 不跨機制)的
+        # 分級加權離散度低於解析底(RANKABLE_STD_MIN)→ 排序落雜訊內、無可靠方向 → 標 rankable=False。
+        # **純 additive**:只加 rankable / within_mechanism_std 兩鍵 + 一條彙總警告,**絕不動
+        # value/lower/upper**(不收窄區間;覆蓋率逐位不變,§4 只可加寬不可收窄)。資料太薄(gp 無此
+        # 機制或軸 Σw<MIN_GROUP_WEIGHT)→ rankable 回 None → 不標旗(維持現行為,不亂標)。
+        non_rankable: List[str] = []
+        if gp is not None:
+            for axis in list(flavor):
+                r = gp.rankable(axis, params.brew_mechanism)
+                if r is None:
+                    continue
+                flavor[axis]["rankable"] = r
+                s = gp.axis_stdev(axis, params.brew_mechanism)
+                if s is not None:
+                    flavor[axis]["within_mechanism_std"] = round(s, 2)
+                if not r:
+                    non_rankable.append(axis)
+        if non_rankable:
+            flavor_warnings.append(
+                f"近常數軸(此機制內加權標準差 < {RANKABLE_STD_MIN}、跨樣本差異落在引擎解析內、排序不可靠):"
+                f"{'、'.join(non_rankable)}——只報量級水平,**不宣稱方向/排序**(保守:寧不宣稱,鐵則 §3/§4)。"
             )
         extraction = physics.flavor_prior_from_extraction(params.tds_pct, params.ey_pct)
         return {

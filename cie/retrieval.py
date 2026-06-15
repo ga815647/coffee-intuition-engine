@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import math
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
@@ -33,6 +34,21 @@ SHRINK_PRIOR_STRENGTH = 3.0  # 群組先驗的等效樣本數(貝氏收縮)
 # 機制根層的群組均值有效權重下限:低於此即該機制資料太薄、其均值不可信,GroupPrior.mean 回 None,
 # 呼叫端退回物理常數(不讓 1-2 筆退化資料的均值假裝成可信先驗;真語料各機制皆遠超此值)。
 MIN_GROUP_WEIGHT = 3.0
+# 近常數軸誠實標的「可排序性」門檻 = 機制內分級加權標準差下限(鐵則 §3 方向>絕對 / §4 誠實不確定)。
+# **這是離散度 proxy,不是直接量方向準確率**:某軸在該機制內的加權離散度低於此 → 跨樣本差異小於
+# 引擎有效解析(與風味軸 conformal 半寬地板 MIN_FLAVOR_MARGIN=0.5 同數量級)→ 任何排序/方向落在
+# 雜訊內、**不可靠** → 標 rankable=False、只報量級、不宣稱方向。
+# **刻意保守(寧過度抑制,不過度宣稱)**:此 proxy 會連帶標掉「離散低但仍有些微方向訊號」的軸——例如
+# sweetness 機制內 wstd 0.56–0.69 被標,但 CV pairwise 方向其實到 0.60–0.67;在 §3/§4 下,對弱訊號軸
+# 少宣稱方向(over-suppress)是安全的錯誤方向,勝過對近常數軸假裝有序。真正零訊號的 balance/aftertaste
+# (CV 方向 0.50/0.56)才是本旗標核心目標。要更嚴謹可改用直接量的 per-(機制,軸) pairwise 方向準確率
+# (eval.run 已分機制/分軸報方向、GroupPrior.axis_stdev 給 wstd,可據此重校門檻);wstd 是其堪用近似。
+# 門檻訂 0.75(≈1.5×MIN_FLAVOR_MARGIN,經驗值)在當前語料乾淨切開:標 balance/aftertaste/sweetness +
+# immersion/percolation 的 bitterness(機制內 wstd 0.44–0.72),不誤標 acidity/body/clarity 與 pressure 的
+# bitterness(0.83–1.42)。⚠ 邊際偏薄(aftertaste/immersion 0.72、body/percolation 0.83 距門檻僅
+# 0.03/0.08),語料漂移可能翻轉個別格 → 動語料後須重跑 CV 重校(對應 corpus 測試也須更新)。
+# bitterness 跨機制不同判定正是 §1「變異只在機制內算」鐵證。
+RANKABLE_STD_MIN = 0.75
 
 
 @dataclass
@@ -58,17 +74,32 @@ class RetrievalResult:
 
 @dataclass
 class _Acc:
-    """分級加權累加器:Σw、Σwv → 加權均值。"""
+    """分級加權累加器:Σw、Σwv、Σwv² → 加權均值與加權標準差。"""
     w: float = 0.0
     wv: float = 0.0
+    wvv: float = 0.0   # Σw·v²(第二動差,供加權變異/標準差;見 stdev)
 
     def add(self, weight: float, value: float) -> None:
         self.w += weight
         self.wv += weight * value
+        self.wvv += weight * value * value
 
     @property
     def mean(self) -> Optional[float]:
         return self.wv / self.w if self.w > 0 else None
+
+    @property
+    def stdev(self) -> Optional[float]:
+        """分級加權標準差(母體式):√(Σwv²/Σw − 均值²)。w≤0 → None。
+
+        用計算公式 E[v²]−E[v]²;近常數輸入會讓浮點抵消殘留極小正/負值(±~1e-13),
+        變異 < 1e-9 一律視為 0(0-10 軸的真實離散遠大於此,絕不誤殺)→ 常數軸吐乾淨 0.0。
+        與 mean 同源權重,故不改任何既有均值/估計行為(additive 第二動差)。
+        """
+        if self.w <= 0:
+            return None
+        var = self.wvv / self.w - (self.wv / self.w) ** 2
+        return math.sqrt(var) if var > 1e-9 else 0.0
 
 
 class GroupPrior:
@@ -146,6 +177,29 @@ class GroupPrior:
             if m is not None:
                 out[a] = m
         return out
+
+    def axis_stdev(self, axis: str, mechanism) -> Optional[float]:
+        """機制根層(§1 **只在機制內**,不跨機制混離散度)該軸的分級加權標準差。
+
+        資料太薄(機制根層該軸 Σw < MIN_GROUP_WEIGHT,與 `mean` 同閘)→ None=無從判定離散度,
+        呼叫端不標旗(維持現行為,不亂標)。注意:**刻意只用機制根層 ("m",mech) 桶**,不往焙度/
+        處理法子層收縮——可排序性問的是「整個機制下這軸到底有沒有跨樣本的變化」,該用最大樣本的根層
+        母體離散度;子層分群會人為縮小組內變異、造成假性『不可排序』。
+        """
+        mech = getattr(mechanism, "value", mechanism)
+        root = self._acc.get(("m", mech))
+        if not root or root[axis].w < MIN_GROUP_WEIGHT:
+            return None
+        return root[axis].stdev
+
+    def rankable(self, axis: str, mechanism) -> Optional[bool]:
+        """該軸在此機制內是否離散到足以可靠排序(鐵則 §3 方向>絕對 / §4 誠實不確定)。
+
+        None = 資料太薄、無從判定(不標旗);否則 機制內加權標準差 ≥ RANKABLE_STD_MIN。
+        低於門檻 = 近常數軸:點估/區間仍可報量級水平,但**方向/排序落在雜訊內、不可宣稱**。
+        """
+        s = self.axis_stdev(axis, mechanism)
+        return None if s is None else s >= RANKABLE_STD_MIN
 
 
 def _weight(hit: dict) -> float:
