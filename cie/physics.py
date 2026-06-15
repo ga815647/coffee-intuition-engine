@@ -9,7 +9,7 @@ Matter 2020(義式力學,研磨→E 非單調)。詳見 design §2.2 / §12.1。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Tuple
 
 from .schema import BrewMechanism, BrewParams, FlavorProfile
 
@@ -114,18 +114,26 @@ def golden_cup_target(mechanism: BrewMechanism) -> dict:
 
 
 # 無同豆校準時的『物理粗略』軸量級(§3.2 / §3.4:generic 大方向風味,非精確真值)。
-# 焙度帶/萃取的『確立方向』給保守 0-10 錨點;呼叫端標 source='prior'、無區間,
-# 並附 warning「物理粗略、非實測」。特色(具體風味詞)永遠交給 social_tendency,不在此。
+# 焙度帶/萃取的『確立方向』給保守 0-10 錨點;呼叫端標 source='prior',並附 warning
+# 「物理粗略、非實測」。特色(具體風味詞)永遠交給 social_tendency,不在此。
 _COARSE_BASE = {"acidity": 5.0, "sweetness": 5.5, "bitterness": 4.0, "body": 5.0,
                 "aftertaste": 5.0, "balance": 5.5, "clarity": 5.5}
 
+# 冷啟動 0-10 軸的保守半寬(物理先驗導出的『誠實寬區間』,鐵則 §4 不給假精確 / §6 退先驗要寬)。
+# 焙度帶與萃取皆未知時資訊近零 → 再放寬一級。刻意寬:寧可區間誠實過寬,不可假精確。
+COARSE_MARGIN = 2.5
+COARSE_MARGIN_NO_INFO = 3.0
 
-def coarse_flavor_axes(bean, params: BrewParams) -> Dict[str, float]:
-    """無同豆鄰居時的風味軸『物理粗略量級』(0-10、coarse、非真值)。
+
+def coarse_flavor_axes(bean, params: BrewParams) -> Dict[str, Tuple[float, float, float]]:
+    """無同豆鄰居時的風味軸『物理粗略量級 + 保守寬區間』(0-10、coarse、非真值)。
 
     只用焙度帶與萃取率的確立方向:淺焙→高酸高清晰、低苦低 body;深焙→低酸低清晰、高苦高 body;
-    萃取不足(EY<18)→升酸降甜;過萃(EY>22)→升苦降清晰。刻意 coarse,回傳值搭配
-    source='prior'、無區間,呼叫端標明『物理粗略、非實測』。
+    萃取不足(EY<18)→升酸降甜;過萃(EY>22)→升苦降清晰。刻意 coarse:回傳
+    `{axis: (value, lower, upper)}`,value 為物理粗略量級,`[lower, upper]` 為由物理先驗導出的
+    **保守寬區間**(半寬 `COARSE_MARGIN`;焙度帶與 EY 皆未知時資訊近零 → 加寬到 `COARSE_MARGIN_NO_INFO`),
+    clamp 在 0-10。呼叫端標 source='prior',明示『物理粗略、非實測』。鐵則:冷啟動不給假精確的
+    單一點值(§4),退物理先驗一律附寬區間(§6)。
     """
     band = bean.roast_band() if hasattr(bean, "roast_band") else "unknown"
     ey = params.ey_pct
@@ -141,7 +149,15 @@ def coarse_flavor_axes(bean, params: BrewParams) -> Dict[str, float]:
             axes["acidity"] += 1.0; axes["sweetness"] -= 0.5; axes["balance"] -= 0.5
         elif ey > 22:
             axes["bitterness"] += 1.0; axes["clarity"] -= 0.5; axes["balance"] -= 0.5
-    return {a: round(min(10.0, max(0.0, v)), 1) for a, v in axes.items()}
+    # 確立度 → 帶寬:焙度帶未知(無 Agtron)且無 EY 時連方向都站不穩 → 最寬區間。
+    margin = COARSE_MARGIN_NO_INFO if (band == "unknown" and ey is None) else COARSE_MARGIN
+    out: Dict[str, Tuple[float, float, float]] = {}
+    for a, v in axes.items():
+        v = round(min(10.0, max(0.0, v)), 1)
+        lo = round(max(0.0, v - margin), 1)
+        hi = round(min(10.0, v + margin), 1)
+        out[a] = (v, lo, hi)
+    return out
 
 
 # ────────────────────────────── 偏酸 fix 方向:已知爭議 ──────────────────────────────

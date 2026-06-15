@@ -831,7 +831,7 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 - 回傳欄位:`reputed=true`、`confidence="low"`、`based_on_n`、`grades`(來源級別分布,如 `{"B":3}`)、`origins`、`varieties`、`bean_match_any`、`flavor_notes`(社群常見描述 top-N)、`axis_tendency`(各軸 `{band: low/med/high, mean}`,reputed 均值非主估計)、`note`(帶發表偏差提醒)。
 - **加性決策**:cross-bean 任一級永不定義風味;C 帶發表偏差(難喝的沒人貼)。`recommend` 與 `predict` 都附此欄。
 
-**冷啟動退回(`predict` 無同豆時):** `predicted_flavor` 走 `physics.coarse_flavor_axes`(coarse 0–10、`source="prior"`、**無區間**)+ warning;特色交給 `social_tendency`。此物理退回也讓 eval 對每個 holdout 仍有數值預測(維持方向排序覆蓋)。
+**冷啟動退回(`predict` 無同豆時):** `predicted_flavor` 走 `physics.coarse_flavor_axes`(coarse 0–10、`source="prior"`、**附物理先驗導出的保守寬區間**——半寬 `COARSE_MARGIN=2.5`,焙度帶與 EY 皆未知時資訊近零 → `COARSE_MARGIN_NO_INFO=3.0`,clamp 0–10)+ warning;特色交給 `social_tendency`。**鐵則 §4(不給假精確單一數字)/ §6(退物理先驗要寬區間):冷啟動不再回 `lower/upper=None` 的裸點值,而是有限寬區間。** 此物理退回也讓 eval 對每個 holdout 仍有數值預測與區間(維持方向排序覆蓋)。
 
 **分級召回(§3.1;`engine._recall`):** 先召回較大池(`top_k*3`、≥60),取 `A/B` 各 top_k 與其餘各 top_k 的**聯集**,但**仍依 pool 原生分數序回傳**——只「救援」少數同豆 A/B 不被大量 C 擠出,**不在同分時把 A/B 硬排到 C 前面**(否則 owner 讀證據時 C 自有 self 會被同分 B 擠掉,破 §16.3 多租戶讀可見性)。**不動 `weighted_estimate` 權重 / `assess`。** 測試:`tests/test_neighbor_scope.py::test_graded_recall_rescues_low_score_same_bean_ab`(**受控池**直接證分級是 load-bearing:同豆 B 分數最低、naive `pool[:k]` 會擠掉它,分級召回救回)。
 > **誠實邊界(救援範圍 = 召回池內):** 分級召回只保護**已進入較大池**(score 排名 ≤ `max(top_k*3,60)`)的同豆 A/B。若某同豆 A/B 因嵌入相似度過低、連較大池都進不了(離線雜湊嵌入下偶發),分級召回**無從救起**——那是**嵌入器召回**的責任(接 bge-m3 語意嵌入後預期大幅緩解),非 stratifier 的職責。此處保證的是「**池內**少數 A/B 不被大量 C 的截斷擠出」,不是「任何 A/B 必然召回」。
@@ -861,7 +861,7 @@ claude.ai ─► Cloud Run 容器(server_http.py:MCP + 雙 token 認證 + member
 
 §16.4 規定「風味特色只借同豆」。其代價是:**召回庫對某 (產地×處理法×機制) 格沒有同豆料時,`predict.predicted_flavor` 只能硬湊物理粗略先驗**(`source="prior"`、無區間)。本節定下「這個硬湊有多普遍」的度量,與「把常見豆鋪平」的資料側回應。
 
-**硬湊率(hard-stretch rate;`eval/run.py`):** holdout 中『無同豆鄰居 → 全軸退回物理粗略』的占比(整體 + 分機制)。判定:`predicted_flavor` 全軸 `source=="prior"` ⟺ 該筆硬湊(同豆時各軸為 `neighbors`/`shrunk`,永不以 `prior` 入列)。**只統計 A/B holdout**(C 永不當 holdout,§15.2)。率越高 = 越多豆答不出個別風味特色。報告於 CV 與 dataset 兩路徑、`format_report` 印出。
+**硬湊 / 冷啟動率(hard-stretch rate;`eval/run.py`)— 冷啟動硬化(鐵則 §3/§5/§6):** holdout 中『**無 A/B 同豆方向級接地**』的占比(整體 + 分機制)。判定:`hard_stretch == not has_AB_neighbor`。**關鍵:C 只壓量級、不定方向**,故一顆 C 同豆鄰居雖把 `predicted_flavor` 抬離物理粗略(`source` 變 `neighbors`),**仍算冷啟動**(無 A/B 接地)——一顆 C 鄰居**不得翻掉冷啟動標記**。`has_AB_neighbor` 由 `predict` 的 `evidence`(= 同豆子集,§16.4 PR5)含 A/B 級判定;`has_any_neighbor`(有任一同豆鄰居含只有 C)由 `_neighbor_grounding` **並列報**(整體 + 分機制),兩率之差 = 「只有 C 鄰居、無方向級接地」占比。**只統計 A/B holdout**(C 永不當 holdout,§15.2)。率越高 = 越多豆答不出方向級個別風味。報告於 CV 與 dataset 兩路徑、`format_report` 印出。**MAE 為觀測值、不下硬門檻**(離線雜湊嵌入本就不準,§15.2)。
 
 **Tier-1 覆蓋報告(`tools/coverage_report.py`,§4.1):** 對常見產地 × 處理法(× 機制)網格,依**來源分級**(A/B/C)計數、標空格(`★` Kenya×natural 等優先缺口),並回報**單元錨點覆蓋率**——某 (origin,process,mechanism) 是否有 `variety=""` 的單元錨點。Tier-1 的定義(產地集/各產地處理法/機制)**直接取自 `tools/seed_tier1.py`**,單一真相不漂移(`tests/test_coverage_tier1.py` 釘住「seed 補的筆數 == 報告的缺錨點數」)。
 

@@ -17,6 +17,13 @@ from .schema import FLAVOR_AXES
 
 GRADE_WEIGHT = {"A": 1.0, "B": 0.4, "C": 0.1, "prediction": 0.0}
 
+# 0-10 風味軸的 payload 欄名(weighted_estimate 套絕對 margin 地板的對象;見下)。
+FLAVOR_FIELD_KEYS = frozenset(f"flavor_{a}" for a in FLAVOR_AXES)
+# 0-10 風味軸的 conformal 半寬絕對下限(鐵則 §4:誠實不確定)。近重複鄰居會讓經驗 spread→0,
+# 算出假精確的窄區間;對 0-10 軸設地板,保證區間不窄於 ±0.5。參數軸(溫度/比例/研磨,尺度迥異)
+# 不套此地板。TODO(ingest S0):有 provenance 後可用「獨立來源數」進一步收緊 / 放寬,此處只先補地板。
+MIN_FLAVOR_MARGIN = 0.5
+
 MIN_NEIGHBORS = 3          # 少於此 → 收縮力道強 / 退回先驗
 MIN_A_WEIGHT_RATIO = 0.30  # top 結果 A 級權重佔比下限,否則降信心(防 C 級洗票)
 MIN_EFFECTIVE_WEIGHT = 1.0  # 聚合有效權重 Σ(grade×conf×sim) 下限;低於此即便鄰居「數量」夠也強制 low
@@ -90,6 +97,9 @@ def weighted_estimate(
     # 樣本越少區間越寬(放大係數)
     widen = 1.0 + max(0, MIN_NEIGHBORS - len(vals)) * 0.5
     margin = 1.64 * spread * widen  # ~90% 名目
+    # 0-10 風味軸的絕對 margin 地板:近重複鄰居 spread→0 不得造出假精確窄區間(鐵則 §4)。
+    if field_key in FLAVOR_FIELD_KEYS:
+        margin = max(margin, MIN_FLAVOR_MARGIN)
     return Estimate(round(value, 2), round(value - margin, 2), round(value + margin, 2),
                     round(n_eff, 2), source)
 

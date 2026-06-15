@@ -113,11 +113,12 @@ class Engine:
                 if est.value is not None:
                     flavor[axis] = est.__dict__
         else:
-            # 無同豆鄰居 → predicted_flavor 走物理粗略(coarse、無區間);特色交給 social_tendency。
-            for axis, val in physics.coarse_flavor_axes(bean, params).items():
-                flavor[axis] = Estimate(val, None, None, 0.0, "prior").__dict__
+            # 無同豆鄰居 → predicted_flavor 走物理粗略(coarse + 物理先驗導出的『保守寬區間』,
+            # 鐵則 §4 不給假精確點值 / §6 退先驗要寬);特色交給 social_tendency。
+            for axis, (val, lo, hi) in physics.coarse_flavor_axes(bean, params).items():
+                flavor[axis] = Estimate(val, lo, hi, 0.0, "prior").__dict__
             flavor_warnings.append(
-                "風味特色無同豆校準:predicted_flavor 為物理粗略(generic 大方向、無精確區間),"
+                "風味特色無同豆校準:predicted_flavor 為物理粗略(generic 大方向、保守寬區間、非實測),"
                 "特色見 social_tendency(跨豆/社群參考、非本豆實測)。"
             )
         extraction = physics.flavor_prior_from_extraction(params.tds_pct, params.ey_pct)

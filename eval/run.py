@@ -149,12 +149,21 @@ def _score_holdouts(engine: Engine, holdouts: List[Record],
         if ev_ids & holdout_ids:  # 縱深防禦:鄰居只能來自 store;store 已排除 holdout 時恆 True
             no_holdout_in_evidence = False
         pf = pred["predicted_flavor"]
-        # 硬湊(hard-stretch):無同豆鄰居 → predicted_flavor 退回物理粗略(§16.4)。
-        # 物理退回時所有軸 source=="prior";有同豆時各軸為 neighbors/shrunk(value=None 的軸被略過,
-        # 永不以 source=="prior" 入列)。故「全軸 prior」⟺ 該筆是硬湊出來的、非同豆實測。
-        hard_stretch = bool(pf) and all(e.get("source") == "prior" for e in pf.values())
+        # 冷啟動硬化(鐵則 §3/§5/§6):把「有任一同豆鄰居」與「有 A/B 方向級接地」分開判,
+        # 因為 **C 只壓量級、不定方向**——一顆 C 同豆鄰居把 predicted_flavor 抬離物理粗略
+        # (source 變 neighbors),但它**不該翻掉冷啟動標記**。
+        #   has_any_neighbor = 有任一同豆鄰居(predicted_flavor 非全軸物理 prior)。
+        #   has_AB_neighbor  = evidence(= 同豆子集,§16.4 PR5)含 A/B 級方向接地。
+        # 冷啟動 / 硬湊(hard_stretch)= **無 A/B 同豆接地**(含「只有 C 鄰居」與「全無鄰居」兩種)。
+        all_prior = bool(pf) and all(e.get("source") == "prior" for e in pf.values())
+        has_any_neighbor = bool(pf) and not all_prior
+        ev_grades = {e.get("grade") for e in pred.get("evidence", [])}
+        has_AB_neighbor = bool(ev_grades & {"A", "B"})
+        hard_stretch = not has_AB_neighbor
         rec_out: Dict = {"id": h.id, "mechanism": h.params.brew_mechanism.value,
-                         "grade": h.grade.value, "hard_stretch": hard_stretch, "axes": {}}
+                         "grade": h.grade.value, "hard_stretch": hard_stretch,
+                         "has_any_neighbor": has_any_neighbor,
+                         "has_AB_neighbor": has_AB_neighbor, "axes": {}}
         for a in FLAVOR_AXES:
             true_v = getattr(h.flavor, a)
             est = pf.get(a)
@@ -276,11 +285,13 @@ def _by_mechanism(per_record: List[Dict]) -> Dict[str, Dict]:
 
 
 def _hard_stretch(per_record: List[Dict]) -> Dict:
-    """硬湊率:holdout 中『無同豆鄰居、退回物理粗略』的比例(整體 + 分機制)。
+    """硬湊 / 冷啟動率:holdout 中『無 A/B 同豆方向級接地』的比例(整體 + 分機制)。
 
-    衡量召回庫對「這支豆的特色」的同豆覆蓋有多薄——率越高 = 越多豆只能硬湊物理先驗、
-    答不出個別風味特色(§16.4)。**只統計 A/B holdout**(C 永不當 holdout)。
-    補 Tier-1 同豆料(§4)應讓此率下降。
+    冷啟動硬化(鐵則 §3/§5/§6):`hard_stretch == not has_AB_neighbor`。**C 只壓量級、不定方向**,
+    故一顆 C 同豆鄰居雖把 predicted_flavor 抬離物理粗略,**仍算冷啟動**(無 A/B 接地)——衡量召回庫
+    對「這支豆的特色」有多薄、能不能給方向級答案。率越高 = 越多豆只能硬湊。**只統計 A/B holdout**
+    (C 永不當 holdout)。補 Tier-1 同豆 A/B 料(§4)應讓此率下降。`has_any_neighbor` 另由
+    `_neighbor_grounding` 並列(有任一鄰居含只有 C 的情形)。
     """
     n = len(per_record)
     n_hs = sum(1 for r in per_record if r.get("hard_stretch"))
@@ -294,8 +305,31 @@ def _hard_stretch(per_record: List[Dict]) -> Dict:
         "n": n, "n_hard_stretch": n_hs,
         "rate": round(n_hs / n, 4) if n else None,
         "by_mechanism": by_mech,
-        "note": "無同豆鄰居→物理粗略退回的 holdout 占比;越低=同豆覆蓋越扎實。",
+        "note": "無 A/B 同豆方向級接地的 holdout 占比(含只有 C 鄰居);越低=同豆方向覆蓋越扎實。",
     }
+
+
+def _neighbor_grounding(per_record: List[Dict]) -> Dict:
+    """並列報同豆鄰居接地:`has_any_neighbor`(有任一同豆鄰居)vs `has_AB_neighbor`(有 A/B 接地)。
+
+    冷啟動硬化(鐵則 §3/§5/§6)需把兩者分開報:**C 只壓量級、不定方向**,一顆 C 鄰居把
+    `has_any` 翻真,但**不**翻 `has_AB`(= 冷啟動標記的反面)。兩率之差 = 「只有 C 鄰居、無方向
+    級接地」的 holdout 占比。整體 + 分機制。
+    """
+    def _rates(recs: List[Dict]) -> Dict:
+        m = len(recs)
+        any_n = sum(1 for r in recs if r.get("has_any_neighbor"))
+        ab_n = sum(1 for r in recs if r.get("has_AB_neighbor"))
+        return {"n": m, "has_any_neighbor": any_n, "has_AB_neighbor": ab_n,
+                "any_rate": round(any_n / m, 4) if m else None,
+                "ab_rate": round(ab_n / m, 4) if m else None}
+
+    out = _rates(per_record)
+    out["by_mechanism"] = {mech: _rates([r for r in per_record if r["mechanism"] == mech])
+                           for mech in sorted({r["mechanism"] for r in per_record})}
+    out["note"] = ("has_any=有任一同豆鄰居;has_AB=有 A/B 同豆方向級接地(C 不算)。"
+                   "冷啟動標記=非 has_AB;一顆 C 鄰居翻 has_any 但不翻 has_AB。")
+    return out
 
 
 # ────────────────────────────── 評測主體:分層 k-fold CV(預設) ──────────────────────────────
@@ -362,6 +396,7 @@ def run_cv_eval(k: int = DEFAULT_K, config: Config = CONFIG,
         "direction": direction,
         "by_mechanism": _by_mechanism(all_per_record),
         "hard_stretch": _hard_stretch(all_per_record),
+        "neighbor_grounding": _neighbor_grounding(all_per_record),
         "leakage_checks": {
             "holdout_ids_excluded": ids_excluded,
             "no_holdout_in_evidence": no_ev_leak,
@@ -405,6 +440,7 @@ def run_eval(dataset_path: Path = DATASET_PATH, store: Optional[StoreBackend] = 
         "direction": direction,
         "by_mechanism": _by_mechanism(per_record),
         "hard_stretch": _hard_stretch(per_record),
+        "neighbor_grounding": _neighbor_grounding(per_record),
         "leakage_checks": {
             "holdout_ids_excluded": holdout_ids_excluded,
             "no_holdout_in_evidence": no_holdout_in_evidence,
@@ -459,14 +495,21 @@ def format_report(r: Dict) -> str:
     lines.append(f"{'overall':<12}{ov['n']:>5} {_fmt(ov['mae']):>7} {_fmt(ov['rmse']):>7} "
                  f"{_fmt(ov['coverage'], 2):>8}")
 
-    # 硬湊率(無同豆鄰居→物理粗略退回的占比;§16.4 / §4)
+    # 冷啟動 / 硬湊率(無 A/B 同豆方向級接地;§16.4 / §4)+ has_any vs has_AB 並列
     hs = r.get("hard_stretch")
     if hs:
         lines.append("-" * 72)
         per = "  ".join(f"{m}={mm['rate']:.0%}({mm['n_hard_stretch']}/{mm['n']})"
                         for m, mm in hs["by_mechanism"].items())
         rate = "—" if hs["rate"] is None else f"{hs['rate']:.1%}"
-        lines.append(f"硬湊率(無同豆→物理退回): {rate}  ({hs['n_hard_stretch']}/{hs['n']})   {per}")
+        lines.append(f"冷啟動率(無 A/B 同豆接地): {rate}  ({hs['n_hard_stretch']}/{hs['n']})   {per}")
+    ng = r.get("neighbor_grounding")
+    if ng:
+        ar = "—" if ng["any_rate"] is None else f"{ng['any_rate']:.1%}"
+        br = "—" if ng["ab_rate"] is None else f"{ng['ab_rate']:.1%}"
+        lines.append(f"同豆接地: has_any={ar}({ng['has_any_neighbor']}/{ng['n']})  "
+                     f"has_AB={br}({ng['has_AB_neighbor']}/{ng['n']})   "
+                     f"(C 只壓量級:翻 has_any 不翻 has_AB)")
 
     lines.append("-" * 72)
     lc = r["leakage_checks"]
