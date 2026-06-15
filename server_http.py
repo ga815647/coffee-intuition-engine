@@ -42,6 +42,7 @@ from cie.mcp_principal import (
 from cie.mcp_tools import register_tools
 from cie.rebuild import ServingIndexIntegrityError, prime_serving_index
 from cie.seed import seed as seed_store
+from cie import retrieval
 
 logger = logging.getLogger("cie.server_http")
 
@@ -222,6 +223,9 @@ def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = 
     if primed is not None:
         logger.info("冷啟動:從 R2 canonical 重建 in-memory 索引 %d 筆(嵌入器 %s)。",
                     primed, eng.store.model_id)
+        _qs = retrieval.q_artifact_status(eng.store.model_id)
+        logger.info("冷啟動:q̂ 載入 %s 條目(md5 %s、校準嵌入器 %s、適用 %s)。",
+                    _qs["entries"], _qs["md5"], _qs["calibrated_embedder"], _qs["active"])
         if primed == 0:
             logger.warning("R2 canonical 為空;請先在本機 `python -m cie.bootstrap`(→R2)灌策展語料。")
     elif auto_seed and config.store_backend == "memory":

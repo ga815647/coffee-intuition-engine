@@ -115,6 +115,31 @@ def conformal_active_for(model_id: Optional[str]) -> bool:
     return model_id == _Q_TABLE_EMBEDDER
 
 
+def q_artifact_status(model_id: Optional[str] = None) -> Dict[str, object]:
+    """conformal_q.json 載入狀態(開機觀測用,化暗為明):條目數 / 檔案 md5 / 校準嵌入器 / 是否適用。
+
+    與 PR6 的 serving/canonical count 同一條觀測線:讓 q̂ 載入量、語料指紋(md5,對得上
+    provenance.corpus.md5 才是同一份校準)、校準嵌入器在開機即可見——staleness / 嵌入器不符
+    不再靜默(鐵則 §4)。`model_id` 給定時附 `active`(線上嵌入器是否吃得到 q̂,否則退 1.64)。
+    純讀、無副作用;md5 取自磁碟上的 conformal_q.json(缺檔 → None)。
+    """
+    import hashlib
+    entries = sum(len(a) for a in _Q_TABLE.values())
+    try:
+        md5 = hashlib.md5(_Q_TABLE_PATH.read_bytes()).hexdigest()
+    except OSError:
+        md5 = None
+    status: Dict[str, object] = {
+        "entries": entries,
+        "mechanisms": len(_Q_TABLE),
+        "md5": md5,
+        "calibrated_embedder": _Q_TABLE_EMBEDDER,
+    }
+    if model_id is not None:
+        status["active"] = conformal_active_for(model_id)
+    return status
+
+
 def conformal_z(mechanism, field_key: str) -> float:
     """回傳該 (機制, 風味軸) 的 conformal 半寬係數 q̂;無校準條目 → 1.64 fallback。
 

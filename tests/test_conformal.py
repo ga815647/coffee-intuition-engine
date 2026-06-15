@@ -268,6 +268,33 @@ def test_conformal_active_for_empty_table_or_no_embedder(monkeypatch):
     assert retrieval.conformal_active_for("workers_ai:@cf/baai/bge-m3") is False
 
 
+# ──────────────── q_artifact_status 開機觀測(化暗為明,§4) ────────────────
+
+def test_q_artifact_status_reports_entries_md5_embedder(monkeypatch, tmp_path):
+    """開機觀測:回報 q̂ 條目數 / 機制數 / 檔案 md5 / 校準嵌入器,且 md5 取自磁碟 conformal_q.json。"""
+    p = tmp_path / "conformal_q.json"
+    p.write_bytes(b"some-bytes")
+    monkeypatch.setattr(retrieval, "_Q_TABLE_PATH", p)
+    monkeypatch.setattr(retrieval, "_Q_TABLE",
+                        {"immersion": {"acidity": 1.0, "body": 2.0}, "percolation": {"acidity": 1.5}})
+    monkeypatch.setattr(retrieval, "_Q_TABLE_EMBEDDER", "workers_ai:@cf/baai/bge-m3")
+    st = retrieval.q_artifact_status()
+    assert st["entries"] == 3 and st["mechanisms"] == 2
+    assert st["calibrated_embedder"] == "workers_ai:@cf/baai/bge-m3"
+    assert st["md5"] == hashlib.md5(b"some-bytes").hexdigest()
+    assert "active" not in st  # 未給 model_id → 不報 active
+
+
+def test_q_artifact_status_active_tracks_embedder_match(monkeypatch, tmp_path):
+    """給 model_id 時附 active:線上嵌入器 == 校準嵌入器才適用(對齊 conformal_active_for)。"""
+    monkeypatch.setattr(retrieval, "_Q_TABLE_PATH", tmp_path / "nope.json")  # 缺檔
+    monkeypatch.setattr(retrieval, "_Q_TABLE", {"immersion": {"acidity": 1.0}})
+    monkeypatch.setattr(retrieval, "_Q_TABLE_EMBEDDER", "workers_ai:@cf/baai/bge-m3")
+    assert retrieval.q_artifact_status("workers_ai:@cf/baai/bge-m3")["active"] is True
+    assert retrieval.q_artifact_status("local-hash:256")["active"] is False
+    assert retrieval.q_artifact_status("workers_ai:@cf/baai/bge-m3")["md5"] is None  # 缺檔 → None
+
+
 # ────────────────────────────── 校準工具純函式 ──────────────────────────────
 
 def test_conformal_quantile_finite_sample_rank():

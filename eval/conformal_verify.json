@@ -1,15 +1,15 @@
 {
   "header": {
-    "generated_utc": "2026-06-15T11:43:02+00:00",
+    "generated_utc": "2026-06-15T13:12:41+00:00",
     "embedder": "workers_ai:@cf/baai/bge-m3",
     "corpus": {
       "path": "global.jsonl",
-      "n_records": 537,
-      "md5": "6b2bc8b4c70b9643c64a6d38924e0c60"
+      "n_records": 538,
+      "md5": "19493054a69807abe11e5ec6b3c2bdd3"
     },
     "nominal_coverage": 0.9,
     "k_folds": 5,
-    "n_holdout": 324,
+    "n_holdout": 325,
     "q_entries_loaded": 9,
     "interpretation": "IN-SAMPLE sanity check over deterministic CV folds — NOT independent out-of-sample validation. q̂ is fit on the same z-path score set this coverage is measured against; with the conservative conformal quantile + MIN_FLAVOR_MARGIN floor + [0,10] clamp, per-(mechanism×axis) coverage ≥ nominal is largely guaranteed by ARITHMETIC, not generalization. Thin cells (n≈22–53) clear nominal by only ~0.02–0.04, so deployment sampling on new beans can dip below. What this DOES prove: q̂ written correctly, floor/clamp applied, MAE unchanged (point estimates not moved), no §1 cross-mechanism leak. True generalization awaits blind-test on held-out beans."
   },
@@ -24,14 +24,14 @@
       "acidity": 1.5334,
       "body": 1.6267,
       "aftertaste": 0.7334,
-      "bitterness": 1.3318,
+      "bitterness": 1.3218,
       "clarity": 2.4001
     }
   },
   "overall": {
     "n": 2222,
     "mae": 0.578,
-    "rmse": 0.7825,
+    "rmse": 0.7824,
     "coverage": 0.9698
   },
   "by_cell": {

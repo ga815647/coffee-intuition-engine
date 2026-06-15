@@ -1,11 +1,11 @@
 {
   "provenance": {
-    "generated_utc": "2026-06-15T10:59:46+00:00",
+    "generated_utc": "2026-06-15T13:08:02+00:00",
     "embedder": "workers_ai:@cf/baai/bge-m3",
     "corpus": {
       "path": "global.jsonl",
-      "n_records": 537,
-      "md5": "6b2bc8b4c70b9643c64a6d38924e0c60"
+      "n_records": 538,
+      "md5": "19493054a69807abe11e5ec6b3c2bdd3"
     },
     "nominal_coverage": 0.9,
     "alpha": 0.1,
@@ -73,57 +73,59 @@
       },
       "percolation": {
         "acidity": {
-          "seen": 128,
+          "seen": 129,
           "skip_not_z_path": 68,
           "used": 53,
           "skip_floored": 5,
-          "skip_clamped": 2
-        },
-        "sweetness": {
-          "seen": 128,
-          "skip_not_z_path": 68,
-          "skip_clamped": 34,
-          "used": 15,
-          "skip_floored": 10,
+          "skip_clamped": 2,
           "skip_missing": 1
         },
+        "sweetness": {
+          "seen": 129,
+          "skip_not_z_path": 68,
+          "skip_clamped": 34,
+          "skip_floored": 10,
+          "used": 15,
+          "skip_missing": 2
+        },
         "bitterness": {
-          "seen": 128,
+          "seen": 129,
           "skip_not_z_path": 69,
           "skip_clamped": 21,
           "used": 31,
-          "skip_missing": 2,
-          "skip_floored": 5
+          "skip_floored": 5,
+          "skip_missing": 3
         },
         "body": {
-          "seen": 128,
+          "seen": 129,
           "skip_not_z_path": 68,
           "used": 52,
           "skip_floored": 6,
-          "skip_missing": 2
+          "skip_missing": 3
         },
         "aftertaste": {
-          "seen": 128,
+          "seen": 129,
           "skip_not_z_path": 68,
           "used": 43,
-          "skip_clamped": 5,
-          "skip_missing": 4,
-          "skip_floored": 8
+          "skip_floored": 8,
+          "skip_missing": 5,
+          "skip_clamped": 5
         },
         "balance": {
-          "seen": 128,
+          "seen": 129,
           "skip_not_z_path": 69,
           "skip_clamped": 34,
-          "used": 16,
           "skip_floored": 7,
-          "skip_missing": 2
+          "used": 16,
+          "skip_missing": 3
         },
         "clarity": {
-          "seen": 128,
+          "seen": 129,
           "skip_not_z_path": 68,
           "skip_clamped": 33,
           "used": 25,
-          "skip_floored": 2
+          "skip_floored": 2,
+          "skip_missing": 1
         }
       },
       "pressure": {
@@ -187,7 +189,7 @@
       "acidity": 1.5334,
       "body": 1.6267,
       "aftertaste": 0.7334,
-      "bitterness": 1.3318,
+      "bitterness": 1.3218,
       "clarity": 2.4001
     }
   }

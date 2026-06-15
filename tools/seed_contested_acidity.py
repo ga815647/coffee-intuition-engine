@@ -1,5 +1,12 @@
 """owner curation:把「偏酸 fix 方向爭議」的 global 知識條目寫入 canonical 真相層(→ live D1)。
 
+⚠️ **已退役(2026-06-15):此筆已併入 `corpus/global.jsonl`(→538 筆),成為 bootstrap / 校準 /
+   staleness / 服務的同一份 CI-可讀真相**(provenance reconcile:校準集=staleness=服務集)。一般
+   情況**不需再跑本腳本**——重建走 `python -m cie.bootstrap` 即會載入它。本腳本保留作 idempotent
+   災後補種(固定 id → INSERT OR REPLACE,重跑只覆寫同一筆、**不再額外加**;與 corpus 那筆同源、
+   `build_record()` 序列化逐位相同,故 corpus 與 live D1 內容一致)。動到本條目欄位時,須同步更新
+   `corpus/global.jsonl` 那筆並重跑 `python -m tools.calibrate_conformal`(否則 staleness 護欄轉紅)。
+
 這是 Phase 2 的 **data 層對應物**:physics.py 的 `contested_diagnosis`(code 標記)驅動 live
 `diagnose` 輸出爭議狀態;本條目把同一份『Cotter 第二訊號 = B 級』記成 canonical 真相,讓它
 (a) 可被 `snapshot` 匯出回 git 可回溯,(b) 出現在 percolation recall 的 evidence(B 級鄰居)。
