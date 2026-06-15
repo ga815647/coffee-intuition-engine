@@ -168,12 +168,12 @@ def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = 
     """組裝 ASGI app。回傳 (app, mcp)。
 
     冷啟動載入(每容器一次,非每請求):
-      - **生產自幹 index(記憶體後端 + R2 canonical)**:從共用 R2 canonical 重嵌重建
+      - **生產自幹 index(記憶體後端 + 共用 canonical D1/R2)**:從共用 canonical 重嵌重建
         in-memory 索引(`prime_serving_index`);同實例後續請求重用,scale-to-zero 後下次
-        冷啟動再建。R2 為單一共用真相,owner 本機寫的 global 下次冷啟動讀得到。
+        冷啟動再建。canonical(生產 = D1)為單一共用真相,owner 本機寫的 global 下次冷啟動讀得到。
       - **離線開發(memory + 本地 canonical)**:`auto_seed` 為真且庫空時灌 6 筆冷啟動種子。
 
-    auto_seed 僅影響離線開發路徑;生產走 cie.bootstrap(→R2)+ 冷啟動重建,不灌 6 筆種子。
+    auto_seed 僅影響離線開發路徑;生產走 cie.bootstrap(→canonical)+ 冷啟動重建,不灌 6 筆種子。
     """
     from mcp.server.fastmcp import FastMCP
 
@@ -221,13 +221,14 @@ def build_app(config=CONFIG, engine: Optional[Engine] = None, auto_seed: bool = 
         logger.error("冷啟動從 canonical 重建失敗;以現有索引續行(/health 會顯示 serving_index_count 落差)。",
                      exc_info=True)
     if primed is not None:
-        logger.info("冷啟動:從 R2 canonical 重建 in-memory 索引 %d 筆(嵌入器 %s)。",
-                    primed, eng.store.model_id)
+        logger.info("冷啟動:從 %s canonical 重建 in-memory 索引 %d 筆(嵌入器 %s)。",
+                    config.canonical_backend.upper(), primed, eng.store.model_id)
         _qs = retrieval.q_artifact_status(eng.store.model_id)
         logger.info("冷啟動:q̂ 載入 %s 條目(md5 %s、校準嵌入器 %s、適用 %s)。",
                     _qs["entries"], _qs["md5"], _qs["calibrated_embedder"], _qs["active"])
         if primed == 0:
-            logger.warning("R2 canonical 為空;請先在本機 `python -m cie.bootstrap`(→R2)灌策展語料。")
+            logger.warning("%s canonical 為空;請先在本機 `python -m cie.bootstrap` 灌策展語料。",
+                           config.canonical_backend.upper())
     elif auto_seed and config.store_backend == "memory":
         # 離線開發後備:庫空灌 6 筆冷啟動種子(正式載入走 bootstrap + 冷啟動重建)。
         try:
