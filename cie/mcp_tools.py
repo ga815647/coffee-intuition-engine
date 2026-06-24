@@ -38,7 +38,10 @@ brew_mechanism(必填,硬分區鍵,三軌永不互通):
   | pressure(義式加壓:研磨→E 非單調、通道效應主導)。查 A 機制絕不混入 B 機制證據。
 mode: recommend(起手參數)| predict(預測風味,需給 params)| diagnose(問題歸因,給 defect)。
 輸出帶 conformal 區間 / 證據 / 警告。**定位:方向與排序的信心 > 絕對數值**(R² 天花板 ~0.5);
-區間是傾向不是真值,鄰居越少越寬。讀範圍依身分:member 見 global + 自己的 self;純讀 token 見 global。"""
+區間是傾向不是真值,鄰居越少越寬。讀範圍依身分:member 見 global + 自己的 self;純讀 token 見 global。
+keywords: coffee brewing flavor prediction / recommend brew parameters / diagnose extraction problem /
+espresso pour-over V60 drip French-press immersion percolation pressure / grind temperature brew-ratio /
+roast process origin / taste acidity sweetness bitterness body aftertaste / 咖啡 沖煮 萃取 風味 預測 診斷 換泡法 dial-in。"""
 
 LOG_DESC = """寫回一筆校準(寫工具)。三層寫入:
   - HTTP member(具命名空間 token):寫入**強制落自己的 self 客製層**(指定 global / 他人 ns
@@ -47,10 +50,14 @@ LOG_DESC = """寫回一筆校準(寫工具)。三層寫入:
 寫入完整性鐵則(套用於所有人,擋失誤):
   - grade=prediction 為內部保留級(引擎自身預測),**不得當人類真值注入**(注入即拒收)。
   - A 級(人類感官真值)須附 protocol,否則 engine 拒收。
-回傳 {"ok":bool,...};被閘擋下時 ok=False 並說明;經 confinement / 降級時附 trust_notes。"""
+回傳 {"ok":bool,...};被閘擋下時 ok=False 並說明;經 confinement / 降級時附 trust_notes。
+keywords: log / record / save a brew calibration / cupping result / tasting feedback /
+write back extraction outcome / 記錄 校準 回饋 杯測 沖煮結果 寫回。"""
 
 SWAP_DESC = """換泡法推味道(讀工具,純物理先驗)。跨機制僅定性、標高不確定
-(物理軸不足以涵蓋壓力/流動動力學);同機制較可信。請配合 predict() 在目標機制重新預測。"""
+(物理軸不足以涵蓋壓力/流動動力學);同機制較可信。請配合 predict() 在目標機制重新預測。
+keywords: switch / swap brew method / convert recipe across methods / e.g. V60 to espresso or French-press /
+method swap flavor estimate / 換泡法 換沖煮方式 跨機制 預測味道。"""
 
 DELETE_DESC = """刪除一筆校準記錄(寫工具,破壞性)。三層刪除隔離(對稱寫入 confinement):
   - HTTP member(具命名空間 token):**只能刪自己 self 命名空間的記錄**;指定他人 / global 的 id →
@@ -59,16 +66,22 @@ DELETE_DESC = """刪除一筆校準記錄(寫工具,破壞性)。三層刪除隔
   - reader:不可刪。
 雙層刪除:先刪 D1 canonical 真相(權威),再刪記憶體索引;冷啟動從 canonical 重建**不復活**。
 找你自己的 record_id:log_calibration 回傳的 id,或 query_flavor_map 證據(evidence)裡的 id。
-回傳 {"ok":bool, deleted_canonical, deleted_memory, count, ...};找不到 / 非自有 → ok=False。"""
+回傳 {"ok":bool, deleted_canonical, deleted_memory, count, ...};找不到 / 非自有 → ok=False。
+keywords: delete / remove / erase a brew calibration record by id / undo a logged entry /
+刪除 移除 校準 記錄 沖煮紀錄。"""
 
 LIST_CUSTOM_DESC = """列出待審的個人客製記錄(self 客製層,非 global)。**owner / stdio 限定**。
 供晉升審查:逐筆檢視 member / 你自己累積的 self 校準,決定哪些值得升格為 global 客觀真值。
-可選 user_id 過濾單一命名空間。預設不動作=留個人客製(晉升是刻意行為)。"""
+可選 user_id 過濾單一命名空間。預設不動作=留個人客製(晉升是刻意行為)。
+keywords: list / review pending personal customizations / self-layer calibrations awaiting promotion (owner only) /
+列出 待審 個人客製 self 校準。"""
 
 PROMOTE_DESC = """把一筆個人客製記錄(self 層)晉升為 global 客觀真值。**owner / stdio 限定**。
 就地改寫該記錄 user_id→global、套用 global 鐵則:grade 須 A 或 B,A 級須附 protocol(如 SCA_cupping)。
 這是 self→global 的唯一通道(網路面永遠寫不到 global)。回傳 {"ok":bool, promoted_id, ...,
-snapshot_reminder};收尾請依 reminder 跑 `python -m cie.snapshot` 把 global 快照進 git(誤刪可復原)。"""
+snapshot_reminder};收尾請依 reminder 跑 `python -m cie.snapshot` 把 global 快照進 git(誤刪可復原)。
+keywords: promote / approve a personal customization to global objective truth (owner only) / self to global /
+晉升 升格 個人客製 為 global 客觀真值。"""
 
 
 def _bean(origin="", variety="", process="other", roast_agtron=None) -> BeanRoast:
